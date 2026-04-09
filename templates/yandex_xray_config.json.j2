@@ -1,0 +1,44 @@
+{
+  "log": {"loglevel": "info"},
+  "inbounds": [
+{% for host in groups['eu_nodes'] %}
+    {
+      "listen": "0.0.0.0",
+      "port": {{ 4430 + loop.index }},
+      "protocol": "dokodemo-door",
+      "tag": "in_node_{{ loop.index }}",
+      "settings": { "address": "127.0.0.1", "port": 443, "network": "tcp" }
+    }{% if not loop.last %},{% endif %}
+{% endfor %}
+  ],
+  "routing": {
+    "domainStrategy": "AsIs",
+    "rules": [
+{% for host in groups['eu_nodes'] %}
+      { "type": "field", "inboundTag": ["in_node_{{ loop.index }}"], "outboundTag": "eu_node_{{ loop.index }}" }{% if not loop.last %},{% endif %}
+{% endfor %}
+    ]
+  },
+  "outbounds": [
+{% for host in groups['eu_nodes'] %}
+    {
+      "tag": "eu_node_{{ loop.index }}",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [{"address": "{{ hostvars[host]['ansible_host'] }}", "port": 443, "users": [{"id": "{{ hostvars[host]['bridge_uuid'] | default('00000000-0000-0000-0000-000000000000') }}", "encryption": "none", "flow": "xtls-rprx-vision"}]}]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "serverName": "{{ hostvars[host]['bridge_sni'] }}",
+          "fingerprint": "chrome",
+          "publicKey": "{{ hostvars[host]['bridge_public_key'] }}",
+          "spiderX": "/",
+          "shortId": ""
+        }
+      }
+    }{% if not loop.last %},{% endif %}
+{% endfor %}
+  ]
+}

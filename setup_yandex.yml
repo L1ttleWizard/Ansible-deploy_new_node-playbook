@@ -1,0 +1,60 @@
+---
+- name: Настройка маршрутизации на Yandex-ноде
+  hosts: yandex
+  become: yes
+  tasks:
+
+    - name: Создаем директорию для моста
+      ansible.builtin.file:
+        path: /opt/bridge
+        state: directory
+        mode: '0755'
+
+    - name: Генерируем config.json для Xray bridge-sender
+      ansible.builtin.template:
+        src: templates/xray_config.json.j2
+        dest: /opt/bridge/config.json
+      register: xray_config
+
+    - name: Генерируем docker-compose.yml для Xray bridge-sender
+      ansible.builtin.template:
+        src: templates/xray_docker-compose.yml.j2
+        dest: /opt/bridge/docker-compose.yml
+      register: xray_compose
+
+    - name: Добавляем динамические бекенды в Hiddify HAProxy
+      ansible.builtin.blockinfile:
+        path: /opt/hiddify-manager/haproxy/haproxy.cfg.j2
+        marker: "# {mark} ANSIBLE MANAGED BLOCK: MATRIX AND EU BRIDGE"
+        block: |
+          # ==================================================================
+          #  БЭКЕНД ДЛЯ MATRIX (TUWUNEL)
+          # ==================================================================
+          backend tuwunel_backend
+              mode http
+              http-request set-header Host %[req.hdr(Host)]
+              http-request set-header X-Forwarded-For %[src]
+              http-request set-header X-Forwarded-Proto https
+              server tuwunel_server 127.0.0.1:6167
+
+          # ==================================================================
+          # БЭКЕНД ДЛЯ МОСТА В ЕВРОПУ (XRAY SENDER) 
+          # ==================================================================
+          backend bk_eu_bridge_sender
+              mode tcp
+              balance source
+              option tcp-check
+              {% for host in groups['eu_nodes'] %}
+              server bridge_node_{{ loop.index }} 127.0.0.1:{{ 4430 + loop.index }}
+              {% endfor %}
+      register: haproxy_config
+
+    - name: Перезапускаем мост Xray, если были изменения
+      community.docker.docker_compose_v2:
+        project_src: /opt/bridge
+        state: restarted
+      when: xray_config.changed or xray_compose.changed
+
+    - name: Применяем конфиг Hiddify (рендер шаблона и рестарт HAProxy)
+      ansible.builtin.command: bash /opt/hiddify-manager/apply_configs.sh
+      when: haproxy_config.changed

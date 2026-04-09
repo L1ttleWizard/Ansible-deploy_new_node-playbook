@@ -1,0 +1,8 @@
+services:
+  bridge-receiver:
+    image: teddysun/xray:latest
+    container_name: bridge-receiver
+    restart: always
+    network_mode: "host"
+    volumes:
+      - ./config.json:/etc/xray/config.json:ro
