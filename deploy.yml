@@ -7,16 +7,31 @@
   become: yes
   tasks:
     # --- УСТАНОВКА HAPROXY ---
-    - name: Устанавливаем HAProxy
+    - name: Устанавливаем HAProxy (Debian/Ubuntu)
       ansible.builtin.apt:
         name: haproxy
         state: present
         update_cache: yes
+      when: ansible_os_family == "Debian"
+
+    - name: Устанавливаем HAProxy (RedHat/AlmaLinux)
+      ansible.builtin.dnf:
+        name: haproxy
+        state: present
+      when: ansible_os_family == "RedHat"
 
     - name: Конфигурация HAProxy (Main vs EU)
       ansible.builtin.template:
         src: "{{ 'haproxy_main.cfg.j2' if is_main|default(false) else 'haproxy_eu.cfg.j2' }}"
         dest: /etc/haproxy/haproxy.cfg
+      register: haproxy_conf
+
+    - name: Жестко фиксируем переносы строк в конце для HAProxy
+      ansible.builtin.shell: |
+        sed -i -e :a -e '/^\n*$/{$d;N;};/\n$/ba' /etc/haproxy/haproxy.cfg
+        echo "# EOF FIX" >> /etc/haproxy/haproxy.cfg
+        echo "" >> /etc/haproxy/haproxy.cfg
+        echo "" >> /etc/haproxy/haproxy.cfg
       register: haproxy_conf
 
     - name: Перезапуск HAProxy
@@ -25,42 +40,77 @@
         state: restarted
       when: haproxy_conf.changed
 
-    - name: Устанавливаем UFW
-      ansible.builtin.apt:
-        name: ufw
-        state: present
+    # ==========================================
+    # НАСТРОЙКА ФАЕРВОЛА (КРОСС-ПЛАТФОРМЕННО)
+    # ==========================================
+    
+    # --- БЛОК ДЛЯ DEBIAN/UBUNTU (UFW) ---
+    - name: Настройка UFW для Debian
+      block:
+        - name: Устанавливаем UFW
+          ansible.builtin.apt:
+            name: ufw
+            state: present
+            
+        - name: Разрешаем SSH и HTTPS (порты 22, 443)
+          community.general.ufw:
+            rule: allow
+            port: "{{ item }}"
+            proto: tcp
+          loop: ['22', '443']
+          
+        - name: Разрешаем HTTP (порт 80) ТОЛЬКО для главной ноды
+          community.general.ufw:
+            rule: allow
+            port: '80'
+            proto: tcp
+          when: is_main | default(false)
 
-    - name: Разрешаем SSH
-      community.general.ufw:
-        rule: allow
-        port: '22'
-        proto: tcp
+        - name: Разрешаем 8443 ТОЛЬКО для главной ноды
+          community.general.ufw:
+            rule: allow
+            port: '8443'
+            proto: tcp
+          when: is_main | default(false)
+          
+        - name: Включаем фаервол UFW
+          community.general.ufw:
+            state: enabled
+            policy: deny
+            direction: incoming
+      when: ansible_os_family == "Debian"
 
-    - name: Разрешаем HTTPS (порт 443) абсолютно для всех нод
-      community.general.ufw:
-        rule: allow
-        port: '443'
-        proto: tcp
+    # --- БЛОК ДЛЯ ALMALINUX/CENTOS (FIREWALLD) ---
+    - name: Настройка Firewalld для AlmaLinux
+      block:
+        - name: Устанавливаем firewalld
+          ansible.builtin.dnf:
+            name: firewalld
+            state: present
+            
+        - name: Включаем службу firewalld
+          ansible.builtin.systemd:
+            name: firewalld
+            state: started
+            enabled: yes
+            
+        - name: Открываем базовые порты (SSH, HTTPS)
+          ansible.builtin.shell: |
+            firewall-cmd --permanent --add-port=22/tcp
+            firewall-cmd --permanent --add-port=443/tcp
+            
+        - name: Открываем HTTP (порт 80) ТОЛЬКО для главной ноды
+          ansible.builtin.shell: firewall-cmd --permanent --add-port=80/tcp
+          when: is_main | default(false)
 
-    - name: Разрешаем HTTP (порт 80) ТОЛЬКО для главной ноды с панелью
-      community.general.ufw:
-        rule: allow
-        port: '80'
-        proto: tcp
-      when: is_main | default(false)
 
-    - name: Разрешаем 8443  ТОЛЬКО для главной ноды с панелью
-      community.general.ufw:
-        rule: allow
-        port: '8443'
-        proto: tcp
-      when: is_main | default(false)
-
-    - name: Включаем фаервол и блокируем всё остальное
-      community.general.ufw:
-        state: enabled
-        policy: deny
-        direction: incoming
+        - name: Открываем 8443 ТОЛЬКО для главной ноды
+          ansible.builtin.shell: firewall-cmd --permanent --add-port=8443/tcp
+          when: is_main | default(false)
+            
+        - name: Применяем новые правила фаервола
+          ansible.builtin.shell: firewall-cmd --reload
+      when: ansible_os_family == "RedHat"
         
     # --- ИНТЕГРАЦИЯ С REMNAWAVE API И ЗАПУСК НОДЫ ---
     - name: Получаем список нод из панели
