@@ -6,6 +6,62 @@
   hosts: eu_nodes
   become: yes
   tasks:
+    # --- УСТАНОВКА HAPROXY ---
+    - name: Устанавливаем HAProxy
+      ansible.builtin.apt:
+        name: haproxy
+        state: present
+        update_cache: yes
+
+    - name: Конфигурация HAProxy (Main vs EU)
+      ansible.builtin.template:
+        src: "{{ 'haproxy_main.cfg.j2' if is_main|default(false) else 'haproxy_eu.cfg.j2' }}"
+        dest: /etc/haproxy/haproxy.cfg
+      register: haproxy_conf
+
+    - name: Перезапуск HAProxy
+      ansible.builtin.systemd:
+        name: haproxy
+        state: restarted
+      when: haproxy_conf.changed
+
+    - name: Устанавливаем UFW
+      ansible.builtin.apt:
+        name: ufw
+        state: present
+
+    - name: Разрешаем SSH
+      community.general.ufw:
+        rule: allow
+        port: '22'
+        proto: tcp
+
+    - name: Разрешаем HTTPS (порт 443) абсолютно для всех нод
+      community.general.ufw:
+        rule: allow
+        port: '443'
+        proto: tcp
+
+    - name: Разрешаем HTTP (порт 80) ТОЛЬКО для главной ноды с панелью
+      community.general.ufw:
+        rule: allow
+        port: '80'
+        proto: tcp
+      when: is_main | default(false)
+
+    - name: Разрешаем 8443  ТОЛЬКО для главной ноды с панелью
+      community.general.ufw:
+        rule: allow
+        port: '8443'
+        proto: tcp
+      when: is_main | default(false)
+
+    - name: Включаем фаервол и блокируем всё остальное
+      community.general.ufw:
+        state: enabled
+        policy: deny
+        direction: incoming
+        
     # --- ИНТЕГРАЦИЯ С REMNAWAVE API И ЗАПУСК НОДЫ ---
     - name: Получаем список нод из панели
       ansible.builtin.uri:

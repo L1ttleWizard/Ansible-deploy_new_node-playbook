@@ -1,0 +1,153 @@
+global
+    log /dev/log local0
+    log /dev/log local1 notice
+    chroot /var/lib/haproxy
+    stats socket /run/haproxy/admin.sock mode 660 level admin expose-fd listeners
+    stats timeout 30s
+    user haproxy
+    group haproxy
+    daemon
+
+    ssl-default-bind-ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384
+    ssl-default-bind-options no-sslv3 no-tlsv10 no-tlsv11
+    maxconn 50000
+
+defaults
+    log     global
+    mode    tcp
+    option  tcplog
+    option  dontlognull
+    timeout connect 10s
+    timeout client  2h
+    timeout server  2h
+
+# ==========================================
+# ФРОНТЕНД (Принимает трафик на 443 порту)
+# ==========================================
+frontend https_in
+    bind *:443
+    mode tcp
+
+    tcp-request inspect-delay 5s
+    tcp-request content accept if { req_ssl_hello_type 1 }
+
+    # --- 1. ПРАВИЛА МАРШРУТИЗАЦИИ ДЛЯ WEB (ОТПРАВЛЯЕМ НА РАСШИФРОВКУ) ---
+    acl is_web req_ssl_sni -i {{ remnawave_domain }}
+    acl is_web_sub req_ssl_sni -i sub.{{ remnawave_domain }}
+    use_backend bk_web_loopback if is_web || is_web_sub
+
+    # --- 2. ПРАВИЛА МАРШРУТИЗАЦИИ ПО SNI ДЛЯ VPN ---
+    acl is_xray_bridge req_ssl_sni -i {{ bridge_sni }}
+    use_backend bk_xray_bridge if is_xray_bridge
+
+    acl is_telemt req_ssl_sni -i azure.microsoft.com
+    use_backend bk_telemt if is_telemt
+
+    acl is_vless_tcp req_ssl_sni -i ads.x5.ru
+    use_backend bk_vless_tcp if is_vless_tcp
+
+    acl is_vless_xhttp req_ssl_sni -i sberbank.ru
+    use_backend bk_vless_xhttp if is_vless_xhttp
+
+    acl is_vless_tcp_warp req_ssl_sni -i i.oneme.ru
+    use_backend bk_vless_tcp_warp if is_vless_tcp_warp
+
+    acl is_vless_xhttp_warp req_ssl_sni -i yandex.ru
+    use_backend bk_vless_xhttp_warp if is_vless_xhttp_warp
+
+    default_backend bk_blackhole
+
+# ==========================================
+# HTTP ФРОНТЕНД (Порт 80: Редиректы и Let's Encrypt)
+# ==========================================
+frontend http_in
+    bind *:80
+    mode http
+
+    acl is_certbot path_beg /.well-known/acme-challenge/
+    http-request redirect scheme https code 301 unless is_certbot
+    use_backend bk_certbot if is_certbot
+
+# ==========================================
+# БЭКЕНД ДЛЯ CERTBOT
+# ==========================================
+backend bk_certbot
+    mode http
+    server certbot 127.0.0.1:8888
+
+# ==========================================
+# БЭКЕНДЫ ДЛЯ VPN (Куда отправляем трафик)
+# ==========================================
+backend bk_blackhole
+    mode tcp
+
+backend bk_xray_bridge
+    mode tcp
+    server xray_bridge_local 127.0.0.1:55555
+
+backend bk_telemt
+    mode tcp
+    server telemt_local 127.0.0.1:3128
+
+backend bk_vless_tcp
+    mode tcp
+    server xray_4433 127.0.0.1:4433
+
+backend bk_vless_xhttp
+    mode tcp
+    server xray_7433 127.0.0.1:7433
+
+backend bk_vless_tcp_warp
+    mode tcp
+    server xray_4434 127.0.0.1:4434
+
+backend bk_vless_xhttp_warp
+    mode tcp
+    server xray_7434 127.0.0.1:7434
+
+# ==========================================
+# ПЕТЛЯ ДЛЯ WEB (Передача на локальный HTTP Frontend)
+# ==========================================
+backend bk_web_loopback
+    mode tcp
+    server web_tls 127.0.0.1:8443 send-proxy-v2
+
+# ==========================================
+# WEB ФРОНТЕНД (Расшифровка SSL, HTTP/2, Заголовки)
+# ==========================================
+frontend web_decrypted
+    mode http
+    bind 127.0.0.1:8443 ssl crt /etc/haproxy/certs/ alpn h2,http/1.1 accept-proxy
+    option httplog
+
+    timeout client 60s
+
+    option forwardfor
+    http-request set-header X-Forwarded-Proto https
+    http-request set-header X-Real-IP %[src]
+    http-request set-header X-Forwarded-Host %[req.hdr(Host)]
+    http-request set-header X-Forwarded-Port 443
+
+    compression algo gzip
+    compression type application/atom+xml application/geo+json application/javascript application/x-javascript application/json application/ld+json application/manifest+json application/rdf+xml application/rss+xml application/xhtml+xml application/xml font/eot font/otf font/ttf image/svg+xml text/css text/javascript text/plain text/xml
+
+    acl host_remnawave hdr(host) -i {{ remnawave_domain }}
+    acl host_sub hdr(host) -i sub.{{ remnawave_domain }}
+
+    http-request deny deny_status 403 if !host_remnawave !host_sub
+
+    use_backend bk_remnawave if host_remnawave
+    use_backend bk_remnawave_sub if host_sub
+
+# ==========================================
+# WEB БЭКЕНДЫ (Ваши Docker контейнеры)
+# ==========================================
+backend bk_remnawave
+    mode http
+    timeout server 60s
+    server remnawave 127.0.0.1:3000
+
+backend bk_remnawave_sub
+    mode http
+    timeout server 60s
+    server remnawave-subscription-page 127.0.0.1:3010

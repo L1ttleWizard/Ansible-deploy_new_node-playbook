@@ -1,0 +1,79 @@
+global
+    log /dev/log local0
+    log /dev/log local1 notice
+    chroot /var/lib/haproxy
+    stats socket /run/haproxy/admin.sock mode 660 level admin expose-fd listeners
+    stats timeout 30s
+    user haproxy
+    group haproxy
+    daemon
+    maxconn 50000
+
+defaults
+    log     global
+    mode    tcp
+    option  tcplog
+    option  dontlognull
+    timeout connect 10s
+    timeout client  2h
+    timeout server  2h
+
+frontend https_in
+    bind *:443
+    mode tcp
+    tcp-request inspect-delay 5s
+    tcp-request content accept if { req_ssl_hello_type 1 }
+
+    # 1. ТУННЕЛЬ (Перехват внешнего слоя Матрешки)
+    acl is_xray_bridge req_ssl_sni -i {{ bridge_sni }}
+    use_backend bk_xray_bridge if is_xray_bridge
+
+    # 2. TELEMT
+    acl is_telemt req_ssl_sni -i azure.microsoft.com
+    use_backend bk_telemt if is_telemt
+
+    # 3. ПРОТОКОЛЫ REMNANODE (После распаковки)
+    acl is_vless_tcp req_ssl_sni -i ads.x5.ru
+    use_backend bk_vless_tcp if is_vless_tcp
+
+    acl is_vless_xhttp req_ssl_sni -i sberbank.ru
+    use_backend bk_vless_xhttp if is_vless_xhttp
+
+    acl is_vless_tcp_warp req_ssl_sni -i i.oneme.ru
+    use_backend bk_vless_tcp_warp if is_vless_tcp_warp
+
+    acl is_vless_xhttp_warp req_ssl_sni -i yandex.ru
+    use_backend bk_vless_xhttp_warp if is_vless_xhttp_warp
+
+    # Если пришел мусор - сбрасываем в никуда
+    default_backend bk_blackhole
+
+# ==========================================
+# БЭКЕНДЫ
+# ==========================================
+backend bk_xray_bridge
+    mode tcp
+    server xray_bridge_local 127.0.0.1:55555
+
+backend bk_telemt
+    mode tcp
+    server telemt_local 127.0.0.1:3128
+
+backend bk_vless_tcp
+    mode tcp
+    server xray_4433 127.0.0.1:4433
+
+backend bk_vless_xhttp
+    mode tcp
+    server xray_7433 127.0.0.1:7433
+
+backend bk_vless_tcp_warp
+    mode tcp
+    server xray_4434 127.0.0.1:4434
+
+backend bk_vless_xhttp_warp
+    mode tcp
+    server xray_7434 127.0.0.1:7434
+
+backend bk_blackhole
+    mode tcp
