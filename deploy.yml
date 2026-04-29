@@ -161,6 +161,18 @@
         final_node_secret: "{{ new_node_api.json.secretKey }}"
       when: not existing_node
 
+    - name: Сохраняем node_secret в inventory.ini (для НОВЫХ нод)
+      # Без этого второй прогон playbook'a для ноды, добавленной через
+      # scripts/add_node.sh, упадёт: existing_node будет true, а node_secret
+      # в inventory отсутствует.
+      ansible.builtin.lineinfile:
+        path: "{{ inventory_file }}"
+        regexp: "^{{ inventory_hostname }}\\s.*$"
+        line: "{{ inventory_hostname }} ansible_host={{ ansible_host }} ansible_user={{ ansible_user }}{% if ansible_port is defined %} ansible_port={{ ansible_port }}{% endif %} bridge_sni={{ bridge_sni }} node_port={{ node_port }} country_code={{ country_code | default('EU') }} node_secret=\"{{ final_node_secret }}\""
+      delegate_to: localhost
+      become: false
+      when: not existing_node
+
     - name: Создаем директорию для Remnanode
       ansible.builtin.file:
         path: /opt/remnanode

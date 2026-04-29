@@ -1,7 +1,7 @@
 # Ansible vault password files (никогда не коммитить!)
 .vault_pass
 .vault_pass.txt
-~/.vault_pass
+vault_pass*
 
 # Локальные ansible-каки
 *.retry
