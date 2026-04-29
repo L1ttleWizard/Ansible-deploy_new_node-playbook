@@ -1,0 +1,20 @@
+# Ansible vault password files (никогда не коммитить!)
+.vault_pass
+.vault_pass.txt
+~/.vault_pass
+
+# Локальные ansible-каки
+*.retry
+.ansible/
+*.log
+
+# IDE / editor мусор
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Локальные бекапы inventory
+inventory.ini.bak
+inventory.ini.local
