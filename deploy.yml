@@ -140,7 +140,7 @@
           address: "{{ ansible_host }}"
           port: "{{ node_port }}"
           isTrafficTrackingActive: false
-          countryCode: "EU"
+          countryCode: "{{ country_code | default('EU') }}"
           configProfile:
             activeConfigProfileUuid: "{{ remnawave_profile_uuid }}"
             activeInbounds: "{{ remnawave_inbounds }}"
