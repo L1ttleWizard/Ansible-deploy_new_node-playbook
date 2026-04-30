@@ -1,4 +1,4 @@
----
+
 # ==============================================================================
 # ЭТАП 1: Настройка EU нод (Remnanode, Bridge, Telemt)
 # ==============================================================================
@@ -6,193 +6,11 @@
   hosts: eu_nodes
   become: yes
   tasks:
-    # --- УСТАНОВКА HAPROXY ---
-    - name: Устанавливаем HAProxy (Debian/Ubuntu)
-      ansible.builtin.apt:
-        name: haproxy
-        state: present
-        update_cache: yes
-      when: ansible_os_family == "Debian"
-
-    - name: Устанавливаем HAProxy (RedHat/AlmaLinux)
-      ansible.builtin.dnf:
-        name: haproxy
-        state: present
-      when: ansible_os_family == "RedHat"
-
-    - name: Конфигурация HAProxy (Main vs EU)
-      ansible.builtin.template:
-        src: "{{ 'haproxy_main.cfg.j2' if is_main|default(false) else 'haproxy_eu.cfg.j2' }}"
-        dest: /etc/haproxy/haproxy.cfg
-      register: haproxy_conf
-
-    - name: Жестко фиксируем переносы строк в конце для HAProxy
-      ansible.builtin.shell: |
-        sed -i -e :a -e '/^\n*$/{$d;N;};/\n$/ba' /etc/haproxy/haproxy.cfg
-        echo "# EOF FIX" >> /etc/haproxy/haproxy.cfg
-        echo "" >> /etc/haproxy/haproxy.cfg
-        echo "" >> /etc/haproxy/haproxy.cfg
-      register: haproxy_conf
-
-    - name: Перезапуск HAProxy
-      ansible.builtin.systemd:
-        name: haproxy
-        state: restarted
-      when: haproxy_conf.changed
-
-    # ==========================================
-    # НАСТРОЙКА ФАЕРВОЛА (КРОСС-ПЛАТФОРМЕННО)
-    # ==========================================
-    
-    # --- БЛОК ДЛЯ DEBIAN/UBUNTU (UFW) ---
-    - name: Настройка UFW для Debian
-      block:
-        - name: Устанавливаем UFW
-          ansible.builtin.apt:
-            name: ufw
-            state: present
-            
-        - name: Разрешаем SSH и HTTPS (порты 22, 443)
-          community.general.ufw:
-            rule: allow
-            port: "{{ item }}"
-            proto: tcp
-          loop: ['22', '443']
-          
-        - name: Разрешаем HTTP (порт 80) ТОЛЬКО для главной ноды
-          community.general.ufw:
-            rule: allow
-            port: '80'
-            proto: tcp
-          when: is_main | default(false)
-
-        - name: Разрешаем 8443 ТОЛЬКО для главной ноды
-          community.general.ufw:
-            rule: allow
-            port: '8443'
-            proto: tcp
-          when: is_main | default(false)
-          
-        - name: Включаем фаервол UFW
-          community.general.ufw:
-            state: enabled
-            policy: deny
-            direction: incoming
-      when: ansible_os_family == "Debian"
-
-    # --- БЛОК ДЛЯ ALMALINUX/CENTOS (FIREWALLD) ---
-    - name: Настройка Firewalld для AlmaLinux
-      block:
-        - name: Устанавливаем firewalld
-          ansible.builtin.dnf:
-            name: firewalld
-            state: present
-            
-        - name: Включаем службу firewalld
-          ansible.builtin.systemd:
-            name: firewalld
-            state: started
-            enabled: yes
-            
-        - name: Открываем базовые порты (SSH, HTTPS)
-          ansible.builtin.shell: |
-            firewall-cmd --permanent --add-port=22/tcp
-            firewall-cmd --permanent --add-port=443/tcp
-            
-        - name: Открываем HTTP (порт 80) ТОЛЬКО для главной ноды
-          ansible.builtin.shell: firewall-cmd --permanent --add-port=80/tcp
-          when: is_main | default(false)
-
-
-        - name: Открываем 8443 ТОЛЬКО для главной ноды
-          ansible.builtin.shell: firewall-cmd --permanent --add-port=8443/tcp
-          when: is_main | default(false)
-            
-        - name: Применяем новые правила фаервола
-          ansible.builtin.shell: firewall-cmd --reload
-      when: ansible_os_family == "RedHat"
-        
-    # --- ИНТЕГРАЦИЯ С REMNAWAVE API И ЗАПУСК НОДЫ ---
-    - name: Получаем список нод из панели
-      ansible.builtin.uri:
-        url: "https://{{ remnawave_domain }}/api/nodes/"
-        method: GET
-        headers:
-          Authorization: "Bearer {{ remnawave_api_token }}"
-        return_content: yes
-      register: nodes_list
-      delegate_to: localhost
-      become: false
-
-    - name: Проверяем, существует ли уже нода с таким IP
-      ansible.builtin.set_fact:
-        existing_node: "{{ nodes_list.json.response | selectattr('address', 'equalto', ansible_host) | list | first | default(none) }}"
-
-    - name: Создаем ноду через API (если ее еще нет)
-      ansible.builtin.uri:
-        url: "https://{{ remnawave_domain }}/api/nodes/"
-        method: POST
-        headers:
-          Authorization: "Bearer {{ remnawave_api_token }}"
-        body_format: json
-        body:
-          name: "{{ inventory_hostname }}"
-          address: "{{ ansible_host }}"
-          port: "{{ node_port }}"
-          isTrafficTrackingActive: false
-          countryCode: "{{ country_code | default('EU') }}"
-          configProfile:
-            activeConfigProfileUuid: "{{ remnawave_profile_uuid }}"
-            activeInbounds: "{{ remnawave_inbounds }}"
-        status_code: 201
-        return_content: yes
-      register: new_node_api
-      delegate_to: localhost
-      become: false
-      when: not existing_node
-
-    - name: Финализируем SECRET_KEY (для УЖЕ СУЩЕСТВУЮЩИХ нод)
-      ansible.builtin.set_fact:
-        final_node_secret: "{{ node_secret }}"
-      when: existing_node
-
-    - name: Финализируем SECRET_KEY (для НОВЫХ нод)
-      ansible.builtin.set_fact:
-        final_node_secret: "{{ new_node_api.json.secretKey }}"
-      when: not existing_node
-
-    - name: Сохраняем node_secret в inventory.ini (для НОВЫХ нод)
-      # Без этого второй прогон playbook'a для ноды, добавленной через
-      # scripts/add_node.sh, упадёт: existing_node будет true, а node_secret
-      # в inventory отсутствует.
-      ansible.builtin.lineinfile:
-        path: "{{ inventory_file }}"
-        regexp: "^{{ inventory_hostname }}\\s.*$"
-        line: "{{ inventory_hostname }} ansible_host={{ ansible_host }} ansible_user={{ ansible_user }}{% if ansible_port is defined %} ansible_port={{ ansible_port }}{% endif %} bridge_sni={{ bridge_sni }} node_port={{ node_port }} country_code={{ country_code | default('EU') }} node_secret=\"{{ final_node_secret }}\""
-      delegate_to: localhost
-      become: false
-      when: not existing_node
-
-    - name: Создаем директорию для Remnanode
-      ansible.builtin.file:
-        path: /opt/remnanode
-        state: directory
-        mode: '0755'
-
-    - name: Генерируем docker-compose для Remnanode
-      ansible.builtin.template:
-        src: templates/eu_remnanode_docker-compose.yml.j2
-        dest: /opt/remnanode/docker-compose.yml
-      register: remnanode_compose
-
-    - name: Перезапускаем Remnanode при изменениях
-      ansible.builtin.shell: docker compose down && docker compose up -d
-      args:
-        chdir: /opt/remnanode
-      when: remnanode_compose.changed
-
-    # --- НАСТРОЙКА XRAY МОСТА ---
-    - name: Создаем директорию моста
+    # ==========================================================================
+    # ЧАСТЬ 1: БЕЗОПАСНЫЙ СБОР ФАКТОВ (ВЫПОЛНЯЕТСЯ ДЛЯ ВСЕХ НОД, ВКЛЮЧАЯ MAIN)
+    # Это нужно, чтобы Яндексу было из чего собирать конфиг моста
+    # ==========================================================================
+    - name: Создаем директорию моста (чтобы stat не падал)
       ansible.builtin.file:
         path: /opt/bridge
         state: directory
@@ -203,72 +21,241 @@
         path: /opt/bridge/keys.env
       register: keys_file
 
-    - name: Авто-генерация UUID и ключей X25519 (если нет)
-      ansible.builtin.shell: |
-        UUID=$(cat /proc/sys/kernel/random/uuid)
-        KEYS=$(docker run --rm teddysun/xray x25519)
-        PRIV=$(echo "$KEYS" | grep "Private key:" | awk '{print $3}')
-        PUB=$(echo "$KEYS" | grep "Public key:" | awk '{print $3}')
-        
-        echo "UUID=$UUID" > /opt/bridge/keys.env
-        echo "PRIV=$PRIV" >> /opt/bridge/keys.env
-        echo "PUB=$PUB" >> /opt/bridge/keys.env
-      when: not keys_file.stat.exists
-
-    - name: Считываем ключи с сервера в память Ansible
+    - name: Считываем ключи с сервера (если они уже есть)
       ansible.builtin.slurp:
         src: /opt/bridge/keys.env
       register: keys_raw
+      when: keys_file.stat.exists
 
-    - name: Сохраняем ключи как Facts
+    - name: Сохраняем ключи как Facts (если они уже есть)
       ansible.builtin.set_fact:
         bridge_uuid: "{{ (keys_raw.content | b64decode | regex_search('UUID=(.*)', '\\1'))[0] }}"
         bridge_private_key: "{{ (keys_raw.content | b64decode | regex_search('PRIV=(.*)', '\\1'))[0] }}"
         bridge_public_key: "{{ (keys_raw.content | b64decode | regex_search('PUB=(.*)', '\\1'))[0] }}"
+      when: keys_file.stat.exists
 
-    - name: Генерируем config.json для bridge-receiver
-      ansible.builtin.template:
-        src: templates/eu_xray_config.json.j2
-        dest: /opt/bridge/config.json
-      register: eu_bridge_conf
+    # ==========================================================================
+    # ЧАСТЬ 2: НАСТРОЙКА И УСТАНОВКА (ПРОПУСКАЕТСЯ ДЛЯ MAIN НОДЫ!)
+    # Весь этот блок будет проигнорирован на Болгарии
+    # ==========================================================================
+    - name: Основная настройка Worker-нод
+      when: not (is_main | default(false) | bool)
+      block:
+        # --- УСТАНОВКА HAPROXY ---
+        - name: Устанавливаем HAProxy (Debian/Ubuntu)
+          ansible.builtin.apt:
+            name: haproxy
+            state: present
+            update_cache: yes
+          when: ansible_facts['os_family'] == "Debian"
 
-    - name: Генерируем docker-compose.yml для bridge-receiver
-      ansible.builtin.template:
-        src: templates/eu_docker-compose.yml.j2
-        dest: /opt/bridge/docker-compose.yml
+        - name: Устанавливаем HAProxy (RedHat/AlmaLinux)
+          ansible.builtin.dnf:
+            name: haproxy
+            state: present
+          when: ansible_facts['os_family'] == "RedHat"
 
-    - name: Перезапускаем мост в Европе, если конфиг обновился
-      ansible.builtin.shell: docker compose down && docker compose up -d
-      args:
-        chdir: /opt/bridge
-      when: eu_bridge_conf.changed
+        - name: Конфигурация HAProxy
+          ansible.builtin.template:
+            src: haproxy_eu.cfg.j2
+            dest: /etc/haproxy/haproxy.cfg
+          register: haproxy_conf
 
-    # --- НАСТРОЙКА TELEMT ---
-    - name: Создаем директорию для Telemt
-      ansible.builtin.file:
-        path: /opt/telemt/data
-        state: directory
-        mode: '0755'
+        - name: Жестко фиксируем переносы строк в конце для HAProxy
+          ansible.builtin.shell: |
+            sed -i -e :a -e '/^\n*$/{$d;N;};/\n$/ba' /etc/haproxy/haproxy.cfg
+            echo "# EOF FIX" >> /etc/haproxy/haproxy.cfg
+            echo "" >> /etc/haproxy/haproxy.cfg
+            echo "" >> /etc/haproxy/haproxy.cfg
 
-    - name: Генерируем telemt.toml
-      ansible.builtin.template:
-        src: templates/eu_telemt.toml.j2
-        dest: /opt/telemt/telemt.toml
-      register: telemt_conf
+        - name: Перезапуск HAProxy
+          ansible.builtin.systemd:
+            name: haproxy
+            state: restarted
+          when: haproxy_conf.changed
 
-    - name: Генерируем docker-compose.yml для Telemt
-      ansible.builtin.template:
-        src: templates/eu_telemt_docker-compose.yml.j2
-        dest: /opt/telemt/docker-compose.yml
+        # --- НАСТРОЙКА ФАЕРВОЛА ---
+        - name: Настройка UFW для Debian
+          block:
+            - name: Устанавливаем UFW
+              ansible.builtin.apt:
+                name: ufw
+                state: present
+            - name: Разрешаем SSH и HTTPS (порты 22, 443)
+              community.general.ufw:
+                rule: allow
+                port: "{{ item }}"
+                proto: tcp
+              loop: ['22', '443']
+            - name: Включаем фаервол UFW
+              community.general.ufw:
+                state: enabled
+                policy: deny
+                direction: incoming
+          when: ansible_facts['os_family'] == "Debian"
 
-    - name: Перезапускаем Telemt, если конфиг обновился
-      ansible.builtin.shell: docker compose down && docker compose up -d
-      args:
-        chdir: /opt/telemt
-      when: telemt_conf.changed
+        - name: Настройка Firewalld для AlmaLinux
+          block:
+            - name: Устанавливаем firewalld
+              ansible.builtin.dnf:
+                name: firewalld
+                state: present
+            - name: Включаем службу firewalld
+              ansible.builtin.systemd:
+                name: firewalld
+                state: started
+                enabled: yes
+            - name: Открываем базовые порты (SSH, HTTPS)
+              ansible.builtin.shell: |
+                firewall-cmd --permanent --add-port=22/tcp
+                firewall-cmd --permanent --add-port=443/tcp
+            - name: Применяем новые правила фаервола
+              ansible.builtin.shell: firewall-cmd --reload
+          when: ansible_facts['os_family'] == "RedHat"
 
-    - name: Перезапускаем контейнер remnawave
-      ansible.builtin.shell: docker restart remnawave
+        # --- ИНТЕГРАЦИЯ С REMNAWAVE API ---
+        - name: Получаем список нод из панели
+          ansible.builtin.uri:
+            url: "https://{{ remnawave_domain }}/api/nodes/"
+            method: GET
+            headers:
+              Authorization: "Bearer {{ remnawave_api_token }}"
+            return_content: yes
+          register: nodes_list
+          delegate_to: localhost
+          become: false
+
+        - name: Проверяем, существует ли уже нода с таким IP
+          ansible.builtin.set_fact:
+            existing_node: "{{ nodes_list.json.response | selectattr('address', 'equalto', ansible_host) | list | first | default(none) }}"
+
+        - name: Создаем ноду через API (если ее еще нет)
+          ansible.builtin.uri:
+            url: "https://{{ remnawave_domain }}/api/nodes/"
+            method: POST
+            headers:
+              Authorization: "Bearer {{ remnawave_api_token }}"
+            body_format: json
+            body:
+              name: "{{ inventory_hostname }}"
+              address: "{{ ansible_host }}"
+              port: "{{ node_port }}"
+              isTrafficTrackingActive: false
+              countryCode: "{{ country_code | default('EU') }}"
+              configProfile:
+                activeConfigProfileUuid: "{{ remnawave_profile_uuid }}"
+                activeInbounds: "{{ remnawave_inbounds }}"
+            status_code: 201
+            return_content: yes
+          register: new_node_api
+          delegate_to: localhost
+          become: false
+          when: not existing_node
+
+        - name: Финализируем SECRET_KEY (для существующих нод)
+          ansible.builtin.set_fact:
+            final_node_secret: "{{ node_secret }}"
+          when: existing_node
+
+        - name: Финализируем SECRET_KEY (для новых нод)
+          ansible.builtin.set_fact:
+            final_node_secret: "{{ new_node_api.json.secretKey }}"
+          when: not existing_node
+
+        - name: Сохраняем node_secret в inventory.ini (для новых нод)
+          ansible.builtin.lineinfile:
+            path: "{{ inventory_file }}"
+            regexp: "^{{ inventory_hostname }}\\s.*$"
+            line: "{{ inventory_hostname }} ansible_host={{ ansible_host }} ansible_user={{ ansible_user }}{% if ansible_port is defined %} ansible_port={{ ansible_port }}{% endif %} bridge_sni={{ bridge_sni }} node_port={{ node_port }} country_code={{ country_code | default('EU') }} node_secret=\"{{ final_node_secret }}\""
+          delegate_to: localhost
+          become: false
+          when: not existing_node
+
+        # --- ЗАПУСК REMNANODE ---
+        - name: Создаем директорию для Remnanode
+          ansible.builtin.file:
+            path: /opt/remnanode
+            state: directory
+            mode: '0755'
+
+        - name: Генерируем docker-compose для Remnanode
+          ansible.builtin.template:
+            src: templates/eu_remnanode_docker-compose.yml.j2
+            dest: /opt/remnanode/docker-compose.yml
+          register: remnanode_compose
+
+        - name: Перезапускаем Remnanode при изменениях
+          ansible.builtin.shell: docker compose down && docker compose up -d
+          args:
+            chdir: /opt/remnanode
+          when: remnanode_compose.changed
+
+        # --- ГЕНЕРАЦИЯ КЛЮЧЕЙ XRAY ДЛЯ НОВЫХ НОД ---
+        - name: Авто-генерация UUID и ключей X25519 (если их не было)
+          ansible.builtin.shell: |
+            UUID=$(cat /proc/sys/kernel/random/uuid)
+            KEYS=$(docker run --rm teddysun/xray x25519)
+            PRIV=$(echo "$KEYS" | grep "Private key:" | awk '{print $3}')
+            PUB=$(echo "$KEYS" | grep "Public key:" | awk '{print $3}')
+            echo "UUID=$UUID" > /opt/bridge/keys.env
+            echo "PRIV=$PRIV" >> /opt/bridge/keys.env
+            echo "PUB=$PUB" >> /opt/bridge/keys.env
+          when: not keys_file.stat.exists
+
+        - name: Считываем новые ключи
+          ansible.builtin.slurp:
+            src: /opt/bridge/keys.env
+          register: new_keys_raw
+          when: not keys_file.stat.exists
+
+        - name: Сохраняем новые ключи как Facts
+          ansible.builtin.set_fact:
+            bridge_uuid: "{{ (new_keys_raw.content | b64decode | regex_search('UUID=(.*)', '\\1'))[0] }}"
+            bridge_private_key: "{{ (new_keys_raw.content | b64decode | regex_search('PRIV=(.*)', '\\1'))[0] }}"
+            bridge_public_key: "{{ (new_keys_raw.content | b64decode | regex_search('PUB=(.*)', '\\1'))[0] }}"
+          when: not keys_file.stat.exists
+
+        # --- ЗАПУСК XRAY МОСТА ---
+        - name: Генерируем config.json для bridge-receiver
+          ansible.builtin.template:
+            src: templates/eu_xray_config.json.j2
+            dest: /opt/bridge/config.json
+          register: eu_bridge_conf
+
+        - name: Генерируем docker-compose.yml для bridge-receiver
+          ansible.builtin.template:
+            src: templates/eu_docker-compose.yml.j2
+            dest: /opt/bridge/docker-compose.yml
+
+        - name: Перезапускаем мост в Европе, если конфиг обновился
+          ansible.builtin.shell: docker compose down && docker compose up -d
+          args:
+            chdir: /opt/bridge
+          when: eu_bridge_conf.changed
+
+        # --- НАСТРОЙКА TELEMT ---
+        - name: Создаем директорию для Telemt
+          ansible.builtin.file:
+            path: /opt/telemt/data
+            state: directory
+            mode: '0755'
+
+        - name: Генерируем telemt.toml
+          ansible.builtin.template:
+            src: templates/eu_telemt.toml.j2
+            dest: /opt/telemt/telemt.toml
+          register: telemt_conf
+
+        - name: Генерируем docker-compose.yml для Telemt
+          ansible.builtin.template:
+            src: templates/eu_telemt_docker-compose.yml.j2
+            dest: /opt/telemt/docker-compose.yml
+
+        - name: Перезапускаем Telemt, если конфиг обновился
+          ansible.builtin.shell: docker compose down && docker compose up -d
+          args:
+            chdir: /opt/telemt
+          when: telemt_conf.changed
 
 # ==============================================================================
 # ЭТАП 2: Настройка маршрутизатора Яндекса

@@ -189,7 +189,7 @@ fi
 # регенерит bridge-sender Xray-конфиг и HAProxy-бэкенды на yandex-ноде,
 # которые итерируются по groups['eu_nodes']. Без yandex новая нода будет
 # недоступна через bridge.
-echo "[add_node] Запуск ansible-playbook deploy.yml -l ${NAME},yandex…"
-ansible-playbook "$PLAYBOOK" -i "$INVENTORY" -l "${NAME},yandex"
+echo "[add_node] Запуск ansible-playbook deploy.yml…"
+ansible-playbook "$PLAYBOOK" -i "$INVENTORY"
 
 echo "[add_node] ✅ Нода ${NAME} успешно раскатана."
