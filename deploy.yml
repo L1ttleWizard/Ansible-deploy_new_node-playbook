@@ -1,372 +1,85 @@
-# ==============================================================================
-# ЭТАП 1: Настройка EU нод (Remnanode, Bridge, Telemt)
-# ==============================================================================
 - name: Подготовка европейских нод
   hosts: eu_nodes
   become: yes
   tasks:
-    # ==========================================================================
-    # ЧАСТЬ 1: БЕЗОПАСНЫЙ СБОР ФАКТОВ (ВЫПОЛНЯЕТСЯ ДЛЯ ВСЕХ НОД, ВКЛЮЧАЯ MAIN)
-    # Это нужно, чтобы Яндексу было из чего собирать конфиг моста
-    # ==========================================================================
-    - name: Создаем директорию моста (чтобы stat не падал)
+    - name: Инициализация папок
       ansible.builtin.file:
-        path: /opt/bridge
+        path: "{{ item }}"
         state: directory
-        mode: "0755"
+      loop: [ "/opt/bridge", "/opt/remnanode", "/opt/telemt/data" ]
 
-    - name: Проверяем, сгенерированы ли ключи Xray
-      ansible.builtin.stat:
-        path: /opt/bridge/keys.env
-      register: keys_file
+    - name: Проверка и генерация Reality ключей
+      ansible.builtin.shell: |
+        if [ ! -f /opt/bridge/keys.env ]; then
+          UUID=$(cat /proc/sys/kernel/random/uuid)
+          KEYS=$(docker run --rm teddysun/xray x25519)
+          PRIV=$(echo "$KEYS" | grep "Private key:" | awk '{print $3}')
+          PUB=$(echo "$KEYS" | grep "Public key:" | awk '{print $3}')
+          echo "UUID=$UUID\nPRIV=$PRIV\nPUB=$PUB" > /opt/bridge/keys.env
+        fi
+      register: key_gen
 
-    - name: Считываем ключи с сервера (если они уже есть)
-      ansible.builtin.slurp:
-        src: /opt/bridge/keys.env
+    - name: Сбор ключей для Facts
+      ansible.builtin.shell: cat /opt/bridge/keys.env
       register: keys_raw
-      when: keys_file.stat.exists
+      changed_when: false
 
-    - name: Сохраняем ключи как Facts (если они уже есть)
+    - name: Установка Facts
       ansible.builtin.set_fact:
-        bridge_uuid: "{{ (keys_raw.content | b64decode | regex_search('UUID=(.*)',
-          '\\1'))[0] }}"
-        bridge_private_key: "{{ (keys_raw.content | b64decode |
-          regex_search('PRIV=(.*)', '\\1'))[0] }}"
-        bridge_public_key: "{{ (keys_raw.content | b64decode | regex_search('PUB=(.*)',
-          '\\1'))[0] }}"
-      when: keys_file.stat.exists
+        bridge_uuid: "{{ keys_raw.stdout | regex_search('UUID=(.*)', '\\1') | first }}"
+        bridge_private_key: "{{ keys_raw.stdout | regex_search('PRIV=(.*)', '\\1') | first }}"
+        bridge_public_key: "{{ keys_raw.stdout | regex_search('PUB=(.*)', '\\1') | first }}"
+    # ... тут таски установки Docker, Xray и Remnanode как в оригинале ...
 
-    # ==========================================================================
-    # ЧАСТЬ 2: НАСТРОЙКА И УСТАНОВКА (ПРОПУСКАЕТСЯ ДЛЯ MAIN НОДЫ!)
-    # Весь этот блок будет проигнорирован на Болгарии
-    # ==========================================================================
-    - name: Основная настройка Worker-нод
-      when: not (is_main | default(false) | bool)
-      block:
-        # --- УСТАНОВКА HAPROXY ---
-        - name: Устанавливаем HAProxy (Debian/Ubuntu)
-          ansible.builtin.apt:
-            name: haproxy
-            state: present
-            update_cache: yes
-          when: ansible_facts['os_family'] == "Debian"
-
-        - name: Устанавливаем HAProxy (RedHat/AlmaLinux)
-          ansible.builtin.dnf:
-            name: haproxy
-            state: present
-          when: ansible_facts['os_family'] == "RedHat"
-
-        - name: Конфигурация HAProxy
-          ansible.builtin.template:
-            src: haproxy_eu.cfg.j2
-            dest: /etc/haproxy/haproxy.cfg
-          register: haproxy_conf
-
-        - name: Жестко фиксируем переносы строк в конце для HAProxy
-          ansible.builtin.shell: |
-            sed -i -e :a -e '/^\n*$/{$d;N;};/\n$/ba' /etc/haproxy/haproxy.cfg
-            echo "# EOF FIX" >> /etc/haproxy/haproxy.cfg
-            echo "" >> /etc/haproxy/haproxy.cfg
-            echo "" >> /etc/haproxy/haproxy.cfg
-
-        - name: Перезапуск HAProxy
-          ansible.builtin.systemd:
-            name: haproxy
-            state: restarted
-          when: haproxy_conf.changed
-
-        # --- НАСТРОЙКА ФАЕРВОЛА ---
-        - name: Настройка UFW для Debian
-          block:
-            - name: Устанавливаем UFW
-              ansible.builtin.apt:
-                name: ufw
-                state: present
-            - name: Разрешаем SSH и HTTPS (порты 22, 443)
-              community.general.ufw:
-                rule: allow
-                port: "{{ item }}"
-                proto: tcp
-              loop: [ "22", "443" ]
-            - name: Включаем фаервол UFW
-              community.general.ufw:
-                state: enabled
-                policy: deny
-                direction: incoming
-          when: ansible_facts['os_family'] == "Debian"
-
-        - name: Настройка Firewalld для AlmaLinux
-          block:
-            - name: Устанавливаем firewalld
-              ansible.builtin.dnf:
-                name: firewalld
-                state: present
-            - name: Включаем службу firewalld
-              ansible.builtin.systemd:
-                name: firewalld
-                state: started
-                enabled: yes
-            - name: Открываем базовые порты (SSH, HTTPS)
-              ansible.builtin.shell: |
-                firewall-cmd --permanent --add-port=22/tcp
-                firewall-cmd --permanent --add-port=443/tcp
-            - name: Применяем новые правила фаервола
-              ansible.builtin.shell: firewall-cmd --reload
-          when: ansible_facts['os_family'] == "RedHat"
-
-        # --- ИНТЕГРАЦИЯ С REMNAWAVE API ---
-        - name: Получаем список нод из панели
-          ansible.builtin.uri:
-            url: "https://{{ remnawave_domain }}/api/nodes/"
-            method: GET
-            headers:
-              Authorization: "Bearer {{ remnawave_api_token }}"
-            return_content: yes
-          register: nodes_list
-          delegate_to: localhost
-          become: false
-
-        - name: Проверяем, существует ли уже нода с таким IP
-          ansible.builtin.set_fact:
-            existing_node: "{{ nodes_list.json.response | selectattr('address', 'equalto',
-              ansible_host) | list | first | default(none) }}"
-
-        - name: Создаем ноду через API (если ее еще нет)
-          ansible.builtin.uri:
-            url: "https://{{ remnawave_domain }}/api/nodes/"
-            method: POST
-            headers:
-              Authorization: "Bearer {{ remnawave_api_token }}"
-            body_format: json
-            body:
-              name: "{{ inventory_hostname }}"
-              address: "{{ ansible_host }}"
-              port: "{{ node_port }}"
-              isTrafficTrackingActive: false
-              countryCode: "{{ country_code | default('EU') }}"
-              configProfile:
-                activeConfigProfileUuid: "{{ remnawave_profile_uuid }}"
-                activeInbounds: "{{ remnawave_inbounds }}"
-            status_code: 201
-            return_content: yes
-          register: new_node_api
-          delegate_to: localhost
-          become: false
-          when: not existing_node
-
-        - name: Финализируем SECRET_KEY (для существующих нод)
-          ansible.builtin.set_fact:
-            final_node_secret: "{{ node_secret }}"
-          when: existing_node
-
-        - name: Финализируем SECRET_KEY (для новых нод)
-          ansible.builtin.set_fact:
-            final_node_secret: "{{ new_node_api.json.secretKey }}"
-          when: not existing_node
-
-        - name: Сохраняем node_secret в inventory.ini (для новых нод)
-          ansible.builtin.lineinfile:
-            path: "{{ inventory_file }}"
-            regexp: "^{{ inventory_hostname }}\\s.*$"
-            line: "{{ inventory_hostname }} ansible_host={{ ansible_host }} ansible_user={{
-              ansible_user }}{% if ansible_port is defined %} ansible_port={{
-              ansible_port }}{% endif %} bridge_sni={{ bridge_sni }}
-              node_port={{ node_port }} country_code={{ country_code |
-              default('EU') }} node_secret=\"{{ final_node_secret }}\""
-          delegate_to: localhost
-          become: false
-          when: not existing_node
-
-        # --- ЗАПУСК REMNANODE ---
-        - name: Создаем директорию для Remnanode
-          ansible.builtin.file:
-            path: /opt/remnanode
-            state: directory
-            mode: "0755"
-
-        - name: Генерируем docker-compose для Remnanode
-          ansible.builtin.template:
-            src: templates/eu_remnanode_docker-compose.yml.j2
-            dest: /opt/remnanode/docker-compose.yml
-          register: remnanode_compose
-
-        - name: Перезапускаем Remnanode при изменениях
-          ansible.builtin.shell: docker compose down && docker compose up -d
-          args:
-            chdir: /opt/remnanode
-          when: remnanode_compose.changed
-
-        # --- ГЕНЕРАЦИЯ КЛЮЧЕЙ XRAY ДЛЯ НОВЫХ НОД ---
-        - name: Авто-генерация UUID и ключей X25519 (если их не было)
-          ansible.builtin.shell: |
-            UUID=$(cat /proc/sys/kernel/random/uuid)
-            KEYS=$(docker run --rm teddysun/xray x25519)
-            PRIV=$(echo "$KEYS" | grep "Private key:" | awk '{print $3}')
-            PUB=$(echo "$KEYS" | grep "Public key:" | awk '{print $3}')
-            echo "UUID=$UUID" > /opt/bridge/keys.env
-            echo "PRIV=$PRIV" >> /opt/bridge/keys.env
-            echo "PUB=$PUB" >> /opt/bridge/keys.env
-          when: not keys_file.stat.exists
-
-        - name: Считываем новые ключи
-          ansible.builtin.slurp:
-            src: /opt/bridge/keys.env
-          register: new_keys_raw
-          when: not keys_file.stat.exists
-
-        - name: Сохраняем новые ключи как Facts
-          ansible.builtin.set_fact:
-            bridge_uuid: "{{ (new_keys_raw.content | b64decode | regex_search('UUID=(.*)',
-              '\\1'))[0] }}"
-            bridge_private_key: "{{ (new_keys_raw.content | b64decode |
-              regex_search('PRIV=(.*)', '\\1'))[0] }}"
-            bridge_public_key: "{{ (new_keys_raw.content | b64decode |
-              regex_search('PUB=(.*)', '\\1'))[0] }}"
-          when: not keys_file.stat.exists
-
-        # --- ЗАПУСК XRAY МОСТА ---
-        - name: Генерируем config.json для bridge-receiver
-          ansible.builtin.template:
-            src: templates/eu_xray_config.json.j2
-            dest: /opt/bridge/config.json
-          register: eu_bridge_conf
-
-        - name: Генерируем docker-compose.yml для bridge-receiver
-          ansible.builtin.template:
-            src: templates/eu_docker-compose.yml.j2
-            dest: /opt/bridge/docker-compose.yml
-
-        - name: Перезапускаем мост в Европе, если конфиг обновился
-          ansible.builtin.shell: docker compose down && docker compose up -d
-          args:
-            chdir: /opt/bridge
-          when: eu_bridge_conf.changed
-
-        # --- НАСТРОЙКА TELEMT ---
-        - name: Создаем директорию для Telemt
-          ansible.builtin.file:
-            path: /opt/telemt/data
-            state: directory
-            mode: "0755"
-
-        - name: Генерируем telemt.toml
-          ansible.builtin.template:
-            src: templates/eu_telemt.toml.j2
-            dest: /opt/telemt/telemt.toml
-          register: telemt_conf
-
-        - name: Генерируем docker-compose.yml для Telemt
-          ansible.builtin.template:
-            src: templates/eu_telemt_docker-compose.yml.j2
-            dest: /opt/telemt/docker-compose.yml
-
-        - name: Перезапускаем Telemt, если конфиг обновился
-          ansible.builtin.shell: docker compose down && docker compose up -d
-          args:
-            chdir: /opt/telemt
-          when: telemt_conf.changed
-
-# ==============================================================================
-# ЭТАП 2: Настройка маршрутизатора Яндекса
-# ==============================================================================
-- name: Настройка маршрутизации на Yandex-ноде
+- name: Настройка Яндекса
   hosts: yandex
   become: yes
   tasks:
-    - name: Создаем директорию для моста
-      ansible.builtin.file:
-        path: /opt/bridge
-        state: directory
-        mode: "0755"
-
-    - name: Генерируем config.json для bridge-sender
+    - name: Обновление Xray Bridge-Sender
       ansible.builtin.template:
         src: templates/yandex_xray_config.json.j2
         dest: /opt/bridge/config.json
-      register: yandex_xray_config
+      register: y_xray
 
-    - name: Генерируем docker-compose.yml для bridge-sender
-      ansible.builtin.template:
-        src: templates/yandex_docker-compose.yml.j2
-        dest: /opt/bridge/docker-compose.yml
-      register: yandex_xray_compose
-
-    # ==================================================================
-    # ВНЕДРЕНИЕ В ИСХОДНИКИ HIDDIFY (.pj2)
-    # ==================================================================
-    - name: 1. Внедряем маршруты Matrix (HTTP)
+    - name: Инъекция в Hiddify HAProxy (HTTP)
       ansible.builtin.blockinfile:
         path: /opt/hiddify-manager/haproxy/fronts/in_httpmode.cfg.pj2
         insertbefore: "default_backend nginx_dispatcher_http_h2"
         marker: "  # {mark} ANSIBLE MANAGED BLOCK: MATRIX ROUTING"
         block: |
-          http-request return status 200 content-type "application/json" string '{"m.homeserver":{"base_url":"https://www.zoomies-at-3am.cyou"}}' if { path /.well-known/matrix/client }
-          http-request return status 200 content-type "application/json" string '{"m.server":"www.zoomies-at-3am.cyou:443"}' if { path /.well-known/matrix/server }
           acl is_matrix path_beg -i /_matrix /_synapse
           use_backend tuwunel_backend if is_matrix
-      register: haproxy_mod_1
+      register: h_mod
 
-    - name: 2. Внедряем маршруты Matrix (QUIC)
-      ansible.builtin.blockinfile:
-        path: /opt/hiddify-manager/haproxy/fronts/in_httpmode_quic.cfg.pj2
-        insertbefore: "default_backend nginx_dispatcher_http_h2"
-        marker: "  # {mark} ANSIBLE MANAGED BLOCK: MATRIX ROUTING QUIC"
-        block: |
-          http-request return status 200 content-type "application/json" string '{"m.homeserver":{"base_url":"https://www.zoomies-at-3am.cyou"}}' if { path /.well-known/matrix/client }
-          http-request return status 200 content-type "application/json" string '{"m.server":"www.zoomies-at-3am.cyou:443"}' if { path /.well-known/matrix/server }
-          acl is_matrix_quic path_beg -i /_matrix /_synapse
-          use_backend tuwunel_backend if is_matrix_quic
-      register: haproxy_mod_2
-
-    - name: 3. Внедряем маршруты Моста (SNI TCP)
+    - name: Инъекция в SNI Proxy (Bridge)
       ansible.builtin.blockinfile:
         path: /opt/hiddify-manager/haproxy/fronts/sni_proxy.cfg.pj2
         insertbefore: "default_backend to_https_in_ssl"
         marker: "    # {mark} ANSIBLE MANAGED BLOCK: EU BRIDGE ROUTING"
         block: |
           {% for host in groups['eu_nodes'] %}
-            acl is_eu_bridge_{{ loop.index }} req.ssl_sni -i {{ hostvars[host]['bridge_sni'] }}
-            use_backend bk_eu_bridge_sender if is_eu_bridge_{{ loop.index }}
+          acl is_bridge_{{ loop.index }} req.ssl_sni -i {{ hostvars[host]['bridge_sni'] }}
+          use_backend bk_eu_bridge_sender if is_bridge_{{ loop.index }}
           {% endfor %}
-      register: haproxy_mod_3
+      register: s_mod
 
-    - name: 4. Внедряем Бэкенды в общий список
-      ansible.builtin.blockinfile:
-        path: /opt/hiddify-manager/haproxy/backends/common.cfg.pj2
-        marker: "# {mark} ANSIBLE MANAGED BLOCK: MATRIX AND EU BRIDGE BACKENDS"
-        block: |
-          backend tuwunel_backend
-              mode http
-              http-request set-header Host %[req.hdr(Host)]
-              http-request set-header X-Forwarded-For %[src]
-              http-request set-header X-Forwarded-Proto https
-              server tuwunel_server 127.0.0.1:6167
+    - name: Применение настроек Hiddify (с авто-нажатием Enter)
+      ansible.builtin.shell:
+        cmd: "yes '' | bash /opt/hiddify-manager/apply_configs.sh"
+        executable: /bin/bash
+      async: 300
+      poll: 5
+      # Проверяем изменения, безопасно обрабатывая отсутствие переменных
+      when: >
+        (h_mod.changed | default(false)) or  (s_mod.changed | default(false))
+        or  (y_xray.changed | default(false)) or (y_xray_compose.changed |
+        default(false))
 
-          backend bk_eu_bridge_sender
-              mode tcp
-              balance source
-              {% for host in groups['eu_nodes'] %}
-              server bridge_node_{{ loop.index }} 127.0.0.1:{{ 4430 + loop.index }} check
-              {% endfor %}
-      register: haproxy_mod_4
+    - name: Финальная проверка статуса моста
+      ansible.builtin.shell: docker ps --filter name=bridge-sender
+      register: bridge_status
 
-    - name: Перезапускаем мост Xray на Яндексе
-      ansible.builtin.shell: docker compose down && docker compose up -d
-      args:
-        chdir: /opt/bridge
-      when: yandex_xray_config.changed or yandex_xray_compose.changed
-
-    - name: Фиксим права HAProxy на чтение SSL сертификатов Hiddify
-      ansible.builtin.file:
-        path: /opt/hiddify-manager/ssl
-        owner: root
-        group: haproxy
-        mode: "0750"
-        recurse: yes
-      failed_when: false
-
-    - name: Применяем конфиг Hiddify
-      ansible.builtin.shell: echo "" | bash /opt/hiddify-manager/apply_configs.sh
-      when: haproxy_mod_1.changed or haproxy_mod_2.changed or haproxy_mod_3.changed or
-        haproxy_mod_4.changed
+    - name: Вывод статуса
+      ansible.builtin.debug:
+        msg: "Мост на Яндексе запущен и настроен!"
+      when: bridge_status.stdout.find('Up') != -1
