@@ -1,9 +1,0 @@
-services:
-  telemt:
-    image: whn0thacked/telemt-docker:latest
-    container_name: telemt
-    restart: unless-stopped
-    network_mode: "host"
-    volumes:
-      - ./telemt.toml:/etc/telemt.toml:ro
-      - ./data:/data:rw
