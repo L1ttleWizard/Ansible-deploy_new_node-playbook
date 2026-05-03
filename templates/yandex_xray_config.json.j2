@@ -3,7 +3,7 @@
   "inbounds": [
     {% for host in groups['eu_nodes'] %}
     {
-      "listen": "127.0.0.1",
+      "listen": "0.0.0.0",
       "port": {{ 4430 + loop.index }},
       "protocol": "dokodemo-door",
       "tag": "in_node_{{ loop.index }}",

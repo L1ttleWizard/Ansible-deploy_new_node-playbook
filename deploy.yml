@@ -476,6 +476,10 @@
             acl is_eu_bridge_{{ loop.index }} req.ssl_sni -i {{ hostvars[host]['bridge_sni'] }}
             use_backend bk_eu_bridge_sender if is_eu_bridge_{{ loop.index }}
           {% endfor %}
+          {% for sni in eu_client_snis | default(['ads.x5.ru', 'sberbank.ru', 'i.oneme.ru', 'yandex.ru', 'azure.microsoft.com']) %}
+            acl is_eu_bridge_client_{{ loop.index }} req.ssl_sni -i {{ sni }}
+            use_backend bk_eu_bridge_sender if is_eu_bridge_client_{{ loop.index }}
+          {% endfor %}
       register: haproxy_mod_3
 
     - name: 4. Внедряем Бэкенды в общий список
