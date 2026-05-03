@@ -35,6 +35,7 @@ SSH_PORT=""
 NODE_PORT=""
 BRIDGE_SNI=""
 COUNTRY=""
+SSH_USER="root"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -44,6 +45,7 @@ while [[ $# -gt 0 ]]; do
         --node-port)   NODE_PORT="$2";   shift 2;;
         --bridge-sni)  BRIDGE_SNI="$2";  shift 2;;
         --country)     COUNTRY="$2";     shift 2;;
+        --ssh-user)    SSH_USER="$2";    shift 2;;
         -h|--help)
             cat <<'HELP'
 add_node.sh — добавить новую EU-ноду в инвентарь и раскатать через ansible.
@@ -58,6 +60,8 @@ add_node.sh — добавить новую EU-ноду в инвентарь и
       --country NL
 
 Опционально:
+  --ssh-user        SSH-пользователь для первичного логина (по умолчанию root).
+                    Используется только в связке с SSHPASS_INITIAL.
   SSHPASS_INITIAL=пароль  ./scripts/add_node.sh ...
       Если задано, скопирует master pubkey на новую ноду через
       sshpass+ssh-copy-id перед ansible-ping.
@@ -162,11 +166,21 @@ if [[ -n "${SSHPASS_INITIAL:-}" ]]; then
         echo "[add_node] ssh-copy-id не найден (apt-get install -y openssh-client)." >&2
         exit 1
     fi
-    echo "[add_node] Копирую SSH-ключ master → root@${ADDRESS}:${SSH_PORT}…"
+    echo "[add_node] Копирую SSH-ключ master → ${SSH_USER}@${ADDRESS}:${SSH_PORT}…"
     SSHPASS="$SSHPASS_INITIAL" sshpass -e ssh-copy-id \
         -o StrictHostKeyChecking=accept-new \
         -p "$SSH_PORT" \
-        "root@${ADDRESS}"
+        "${SSH_USER}@${ADDRESS}"
+    if [[ "$SSH_USER" != "root" ]]; then
+        echo "[add_node] Ключ добавлен для ${SSH_USER}; копирую в root через sudo…"
+        SSHPASS="$SSHPASS_INITIAL" sshpass -e ssh \
+            -o StrictHostKeyChecking=accept-new \
+            -p "$SSH_PORT" \
+            "${SSH_USER}@${ADDRESS}" \
+            "sudo -p '' -S mkdir -p /root/.ssh && sudo -p '' -S chmod 700 /root/.ssh && cat ~/.ssh/authorized_keys | sudo -p '' -S tee -a /root/.ssh/authorized_keys >/dev/null && sudo -p '' -S chmod 600 /root/.ssh/authorized_keys" <<EOF || true
+$SSHPASS_INITIAL
+EOF
+    fi
     unset SSHPASS_INITIAL
 fi
 
