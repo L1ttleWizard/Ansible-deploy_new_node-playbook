@@ -338,14 +338,18 @@
           delegate_to: localhost
           become: false
 
-        - name: Вычисляем URL архива telemt
+        - name: Вычисляем имя архива telemt
           ansible.builtin.set_fact:
             telemt_version: "{{ telemt_release.json.tag_name }}"
+            telemt_asset_name: "telemt-{{ telemt_arch }}-linux-{{ telemt_libc }}.tar.gz"
+
+        - name: Вычисляем URL архива telemt
+          ansible.builtin.set_fact:
             telemt_archive_url: >-
               {{
                 (telemt_release.json.assets
-                  | selectattr('name', 'match', '^telemt-' ~ telemt_arch ~ '-linux-' ~ telemt_libc ~ '\\.tar\\.gz$')
-                  | first).browser_download_url
+                  | selectattr('name', 'equalto', telemt_asset_name)
+                  | list | first).browser_download_url
               }}
 
         - name: Скачиваем архив telemt
