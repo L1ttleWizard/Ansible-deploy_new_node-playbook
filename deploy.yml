@@ -516,6 +516,31 @@
         recurse: true
       failed_when: false
 
+    # Отключаем DPI-палевные протоколы (mieru, hysteria2, tuic, naive,
+    # shadowtls). Они рендерятся в singbox-конфиги по флагам в
+    # bool_config таблице hiddifypanel; trafficка по их публичным портам
+    # (mieru tcp 25733-25736 / udp 27693-27696, hysteria2 udp 11196/11199
+    # и т.д.) — характерные DPI-сигнатуры. На прод-узле остаются только
+    # 443 (haproxy) + 22 (ssh) + 80 (haproxy redirect).
+    - name: Отключаем DPI-палевные протоколы в hiddify-panel (Yandex)
+      ansible.builtin.shell: |
+        set -o pipefail
+        mysql -u root hiddifypanel <<'SQL'
+        UPDATE bool_config SET value=0
+          WHERE `key` IN (
+            'mieru_enable',
+            'hysteria_enable',
+            'hysteria_obfs_enable',
+            'tuic_enable',
+            'naive_enable',
+            'shadowtls_enable'
+          );
+        SQL
+      args:
+        executable: /bin/bash
+      register: dpi_disable
+      changed_when: true
+
     - name: Применяем конфиг Hiddify
       ansible.builtin.shell: |
         set -o pipefail
@@ -525,4 +550,5 @@
       when: >-
         haproxy_mod_1.changed or haproxy_mod_2.changed
         or haproxy_mod_3.changed or haproxy_mod_4.changed
+        or dpi_disable.changed
       changed_when: true
