@@ -1,87 +1,127 @@
-
-
 # 🚀 Remnawave + Xray Bridge Deployment
 
-Этот проект автоматизирует развертывание VPN-инфраструктуры "Матрёшка": европейские ноды Remnawave маскируются через российский сервер в Яндекс.Облаке.
+Этот проект автоматизирует развертывание VPN-инфраструктуры "Матрёшка": европейские ноды Remnawave маскируются через российский сервер в Яндекс.Облаке (Hiddify).
 
-## 📋 Требования (на твоем ПК / новой машине)
-1. **Python 3** и **Ansible** (`sudo apt install ansible`)
+Проект полностью рефакторизован под **модульную архитектуру ролей Ansible** и использует **Ansible Vault** для безопасного хранения всех чувствительных данных (секретных ключей нод, токенов API и паролей пользователей Telemt).
+
+---
+
+## 📋 Требования (на управляющей машине / ПК)
+1. **Python 3** и **Ansible** (`sudo apt install ansible` / `pip install ansible-core`).
 2. **SSH-доступ** по ключам ко всем серверам.
-3. Установленная коллекция (нужна для некоторых модулей):
+3. Установленные коллекции Ansible:
    ```bash
-   ansible-galaxy collection install community.docker
+   ansible-galaxy collection install community.docker community.general
    ```
+4. **Файл `.vault-pass`** в корневой директории проекта, содержащий пароль для расшифровки Ansible Vault.
+
+---
 
 ## 📂 Структура проекта
-* `inventory.ini` — список твоих серверов и их настроек.
-* `deploy.yml` — главный сценарий (плейбук).
-* `group_vars/all.yml` — общие настройки API твоей панели.
-* `templates/` — папка с шаблонами конфигов (Xray, Docker, Telemt).
+
+* `ansible.cfg` — конфигурационный файл Ansible (настроен дефолтный инвентарь и путь к `.vault-pass`).
+* `inventory.ini` — список серверов (очищен от секретов).
+* `deploy.yml` — основной плейбук, вызывающий соответствующие роли.
+* `.vault-pass` — локальный файл с паролем дешифрации (добавлен в `.gitignore`, никогда не коммитится!).
+* `group_vars/all/` — глобальные переменные:
+  * `vars.yml` — нечувствительные настройки (домен, UUID профилей панели).
+  * `vault.yml` — зашифрованный Ansible Vault файл с API-токеном и паролями Telemt.
+* `host_vars/<hostname>/` — индивидуальные настройки хостов:
+  * `vars.yml` — нечувствительные параметры и ссылки на vault.
+  * `vault.yml` — зашифрованный `node_secret` хоста.
+* `roles/` — папка с ролями:
+  * `docker` — установка Docker.
+  * `firewall` — настройка UFW/Firewalld.
+  * `haproxy` — установка и настройка HAProxy для worker-нод.
+  * `telemt` — установка официального сервиса Telemt (из GitHub релизов) и генерация системного юнита.
+  * `remnanode` — регистрация нод в панели, генерация Reality-ключей, развёртывание контейнеров Remnanode и Bridge-receiver.
+  * `yandex_bridge` — настройка bridge-sender, интеграция Matrix/Bridge роутинга в Hiddify, отключение DPI-протоколов.
+* `scripts/add_node.sh` — хелпер-скрипт для добавления новых нод через Telegram-бота или вручную.
 
 ---
 
 ## 🛠 Настройка перед запуском
 
-### 1. Отредактируй `inventory.ini`
-Укажи свои IP и секреты нод (секрет берется в админке Remnawave):
+### 1. Создайте `.vault-pass` в корне проекта
+Запишите ваш секретный пароль для Vault:
+```bash
+echo "ваш_пароль_vault" > .vault-pass
+```
+
+### 2. Заполните `inventory.ini`
+Укажите адреса и параметры ваших нод (свойства `node_secret` здесь больше указывать не нужно!):
 ```ini
 [yandex]
 yandex_node ansible_host=IP_ЯНДЕКСА ansible_user=andrwy
 
 [eu_nodes]
-bulgaria_main ansible_host=femboyhooters.kawaiinekos.cfd ansible_user=root node_port=3743 node_secret="ВАШ_СЕКРЕТ" bridge_sni=www.microsoft.com
-eu_node_2     ansible_host=caffeinated.kawaiinekos.cfd ansible_user=root node_port=1488 node_secret="ВАШ_СЕКРЕТ" bridge_sni=drive.google.com
+bulgaria_main ansible_host=femboyhooters.kawaiinekos.cfd ansible_user=root bridge_sni=www.microsoft.com is_main=true node_port=3743
+;eu_node_2     ansible_host=caffeinated.kawaiinekos.cfd ansible_user=root bridge_sni=drive.google.com node_port=1488
 ```
 
-### 2. Настрой `group_vars/all.yml`
-Впиши токен и ID профиля из своей панели:
+### 3. Настройте глобальные переменные (`group_vars/all/`)
+Все чувствительные данные шифруются в Vault. 
+Для создания или редактирования зашифрованных файлов используйте команду:
+```bash
+# Редактирование глобальных секретов
+ansible-vault edit group_vars/all/vault.yml
+```
+Пример содержимого `group_vars/all/vault.yml` (после расшифровки):
 ```yaml
-remnawave_domain: "nekodera.kawaiinekos.cfd"
-remnawave_api_token: "ВАШ_API_TOKEN_ИЗ_АДМИНКИ"
-remnawave_profile_uuid: "7b819d85-3004-480f-99a7-43337e47cbba"
-remnawave_inbounds:
-  - "UUID_1"
-  - "UUID_2"
+---
+vault_remnawave_api_token: "ВАШ_API_TOKEN_ИЗ_АДМИНКИ"
+vault_telemt_users:
+  docker: "ключ_пользователя_docker_32_символа"
+  l1ttlewizard: "ключ_пользователя_l1ttlewizard_32_символа"
+```
+
+### 4. Настройте секреты хостов (`host_vars/`)
+Каждая нода имеет свой `node_secret` (полученный из Remnawave), который хранится в `host_vars/<hostname>/vault.yml` в зашифрованном виде.
+```bash
+# Редактирование секрета для конкретного хоста
+ansible-vault edit host_vars/bulgaria_main/vault.yml
+```
+Пример содержимого `host_vars/bulgaria_main/vault.yml` (после расшифровки):
+```yaml
+---
+vault_node_secret: "eyJub2RlQ2VydF..."
 ```
 
 ---
 
 ## 🚀 Запуск деплоя
 
-Чтобы запустить настройку всей сети с нуля на новой машине, выполни:
+Благодаря конфигурации в `ansible.cfg` запуск выполняется одной короткой командой (пароль подтянется автоматически из файла `.vault-pass`):
 
 ```bash
-ansible-playbook deploy.yml -i inventory.ini
+ansible-playbook deploy.yml
 ```
 
-### Что сделает скрипт:
-1. **На серверах в Европе:**
-   * Установит Docker.
-   * Проверит/зарегистрирует ноду в панели Remnawave и запустит её.
-   * Сгенерирует уникальные ключи Xray и запустит `bridge-receiver`.
-   * Настроит и запустит Telegram-прокси `telemt`.
-2. **На сервере Яндекса:**
-   * Настроит `bridge-sender` (подключится ко всем EU-нодам).
-   * Автоматически пропишет новые бекенды в HAProxy (Hiddify).
-   * Исправит конфиг Hiddify (добавит переносы строк) и применит настройки.
-
----
-
-## ⚠️ Решение частых ошибок
-* **"node_secret is undefined"**: Проверь, что в `inventory.ini` для каждой ноды прописан `node_secret`.
-* **"Missing LF on last line"**: Скрипт фиксит это автоматически, но если HAProxy не стартует, проверь `haproxy.cfg.j2` на наличие пустых строк в конце.
-* **"sudo: a password is required"**: Убедись, что на серверах у пользователя настроен беспарольный sudo, либо запускай с флагом `-K` (но лучше настроить SSH-ключи).
+### Что делает плейбук:
+1. **На европейских нодах (Worker-ноды):**
+   * Устанавливает и запускает Docker.
+   * Настраивает брандмауэр UFW (Debian) или Firewalld (RedHat), открывая порты 22 и 443.
+   * Устанавливает и конфигурирует HAProxy для маршрутизации трафика Reality/Telemt.
+   * Регистрирует ноду в Remnawave по API (если её ещё нет в панели).
+   * Автоматически генерирует UUID и пары ключей Reality (`x25519`), запуская `bridge-receiver`.
+2. **На главной ноде (Bulgaria Main - `is_main=true`):**
+   * Пропускает установку Docker, Firewall и HAProxy (из соображений безопасности ваших ручных конфигов).
+   * Собирает факты о ключах Reality для Yandex-моста.
+3. **На всех нодах (включая Bulgaria Main):**
+   * Устанавливает официальный бинарь Telemt через systemd-сервис и обновляет пользователей на основе зашифрованного списка из Vault.
+4. **На сервере Яндекса (Hiddify):**
+   * Разворачивает `bridge-sender` (подключает выходные туннели Reality на все европейские ноды).
+   * Интегрирует Matrix (HTTP/QUIC) и Bridge (TCP SNI) бэкенды в HAProxy (.pj2 файлы Hiddify-менеджера).
+   * Отключает DPI-палевные протоколы в базе данных Hiddify и применяет конфигурацию.
 
 ---
 
 ## ➕ Добавление новой ноды (через бот или вручную)
 
-`scripts/add_node.sh` — helper, который вызывается Telegram-ботом
-([bot_remna](https://github.com/L1ttleWizard/bot_remna)) для добавления новых
-EU-нод. Можно запускать и руками с master-ноды.
+Скрипт `scripts/add_node.sh` используется для полуавтоматического добавления новых нод в инфраструктуру.
 
 ```bash
-# С master-ноды (Болгарии), где лежит этот клон репо:
+# Запуск с управляющей/master ноды:
 ./scripts/add_node.sh \
     --name eu_node_3 \
     --address node3.example.com \
@@ -91,52 +131,38 @@ EU-нод. Можно запускать и руками с master-ноды.
     --country NL
 ```
 
-Что делает скрипт:
-1. Валидирует аргументы.
-2. Дописывает запись в секцию `[eu_nodes]` файла `inventory.ini` (если её ещё нет).
-3. (опционально) Если задан `SSHPASS_INITIAL` — копирует pubkey master на новую
-   ноду через `sshpass`+`ssh-copy-id`. Пример:
-   `SSHPASS_INITIAL='пароль_root' ./scripts/add_node.sh ...`
-4. Делает `ansible -m ping` чтобы убедиться в доступности.
-5. Запускает `ansible-playbook deploy.yml -l <name>`.
-
-Бот вызывает скрипт по SSH с master, передавая все аргументы; стримит вывод в
-Telegram-сообщение.
+### Алгоритм работы скрипта:
+1. Проверяет наличие `.vault-pass` в корне проекта.
+2. Проверяет аргументы и идемпотентно дописывает ноду в `inventory.ini` под секцию `[eu_nodes]`.
+3. (Опционально) Копирует SSH-ключ, если передан пароль в переменной `SSHPASS_INITIAL`.
+4. Делает тестовый пинг через Ansible.
+5. Запускает деплой для новой ноды.
+6. **Роль `remnanode` на этапе деплоя новой ноды:**
+   * Регистрирует её в панели Remnawave через API.
+   * Получает сгенерированный `secretKey`.
+   * **Автоматически создает** директорию `host_vars/eu_node_3/`.
+   * Записывает публичные ссылки в `vars.yml` и plaintext-секрет в `vault.yml`.
+   * Вызывает локальную утилиту `ansible-vault` для шифрования `vault.yml` на лету с использованием `.vault-pass`. Секрет сохраняется в защищенном виде и готов к коммиту в Git!
 
 ---
 
-## 🔐 Секреты и `ansible-vault`
+## 🔐 Работа с Ansible Vault вручную
 
-⚠️ **Сейчас в репозитории секреты лежат в открытом виде** —
-`group_vars/all.yml` (Remnawave API token) и `inventory.ini` (node_secret для
-каждой ноды). Если репо когда-либо был публичным или попал к третьим лицам:
-
-1. Зайди в админку Remnawave → API tokens → отозви старый, создай новый.
-2. Удали ноды из панели и пересоздай — у новых будет новый `node_secret`.
-3. Замени значения в `group_vars/all.yml` и `inventory.ini` на новые.
-
-После ротации — рекомендую перенести секреты в `ansible-vault`:
-
+Если вам нужно вручную зашифровать/расшифровать файлы или изменить пароль:
 ```bash
-# Создать vault-файл с секретами
-ansible-vault create group_vars/all/vault.yml
-# Внутри:
-#   vault_remnawave_api_token: "..."
-#   vault_node_secrets:
-#     bulgaria_main: "..."
-#     eu_node_2: "..."
+# Зашифровать файл
+ansible-vault encrypt путь/к/файлу.yml
 
-# Поправить group_vars/all.yml — заменить токен ссылкой на vault-переменную:
-#   remnawave_api_token: "{{ vault_remnawave_api_token }}"
+# Расшифровать файл (в plain-text)
+ansible-vault decrypt путь/к/файлу.yml
 
-# Запускать playbook с паролем vault:
-ansible-playbook deploy.yml -i inventory.ini --ask-vault-pass
-# или с файлом-паролем:
-ansible-playbook deploy.yml -i inventory.ini --vault-password-file ~/.vault_pass
+# Просмотреть зашифрованный файл без изменения
+ansible-vault view путь/к/файлу.yml
+
+# Сменить пароль шифрования для всех файлов
+ansible-vault rekey group_vars/all/vault.yml host_vars/*/vault.yml
 ```
 
-См. [официальную документацию ansible-vault](https://docs.ansible.com/ansible/latest/vault_guide/index.html).
-
 ---
-**Автор:** Андрей (Andrwy)
-**Дата:** Апрель 2026
+**Автор:** Андрей (Andrwy)  
+**Рефакторинг:** Antigravity (Май 2026)

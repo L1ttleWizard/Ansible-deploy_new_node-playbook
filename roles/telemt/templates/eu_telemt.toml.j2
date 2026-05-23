@@ -69,8 +69,9 @@ replay_window_secs = 1800
 ignore_time_skew = false
 
 [access.users]
-docker = "0123456789abcdef0123456789abcdef"
-l1ttlewizard = "18ab316865f682822677ee5e5ad642ac"
+{% for user, secret in telemt_users.items() %}
+{{ user }} = "{{ secret }}"
+{% endfor %}
 
 [[upstreams]]
 type = "direct"

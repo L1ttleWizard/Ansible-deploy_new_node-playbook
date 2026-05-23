@@ -1,0 +1,29 @@
+---
+- name: Устанавливаем зависимости для Docker
+  ansible.builtin.package:
+    name:
+      - curl
+      - ca-certificates
+    state: present
+
+- name: Проверяем наличие docker
+  ansible.builtin.command: docker --version
+  register: docker_check
+  changed_when: false
+  failed_when: false
+
+- name: Устанавливаем Docker через get.docker.com
+  ansible.builtin.shell: |
+    set -o pipefail
+    curl -fsSL https://get.docker.com | sh
+  args:
+    executable: /bin/bash
+  register: docker_install
+  changed_when: docker_install.rc == 0
+  when: docker_check.rc != 0
+
+- name: Включаем и запускаем docker-сервис
+  ansible.builtin.systemd:
+    name: docker
+    state: started
+    enabled: true

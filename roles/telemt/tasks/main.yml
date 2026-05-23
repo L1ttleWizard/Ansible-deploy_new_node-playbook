@@ -1,0 +1,106 @@
+---
+- name: TELEMT — миграция на официальный бинарь + systemd
+  block:
+    - name: Останавливаем legacy docker-compose telemt (если есть)
+      community.docker.docker_compose_v2:
+        project_src: /opt/telemt
+        state: absent
+      failed_when: false
+      register: telemt_legacy_down
+
+    - name: Удаляем legacy docker-compose файл telemt (если есть)
+      ansible.builtin.file:
+        path: /opt/telemt/docker-compose.yml
+        state: absent
+
+    - name: Создаём системного пользователя telemt
+      ansible.builtin.user:
+        name: telemt
+        system: true
+        home: /opt/telemt
+        shell: /sbin/nologin
+        create_home: true
+        state: present
+
+    - name: Создаём подпапки working dir для telemt
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: telemt
+        group: telemt
+        mode: "0750"
+      loop:
+        - /opt/telemt
+        - /opt/telemt/cache
+        - /opt/telemt/tlsfront
+        - /etc/telemt
+
+    - name: Определяем архитектуру для telemt
+      ansible.builtin.set_fact:
+        telemt_arch: "{{ 'x86_64' if ansible_architecture in ['x86_64', 'amd64'] else 'aarch64' }}"
+        telemt_libc: "{{ 'musl' if ansible_facts['os_family'] == 'Alpine' else 'gnu' }}"
+
+    - name: Получаем последний релиз telemt
+      ansible.builtin.uri:
+        url: https://api.github.com/repos/telemt/telemt/releases/latest
+        return_content: true
+      register: telemt_release
+      delegate_to: localhost
+      become: false
+
+    - name: Вычисляем имя архива telemt
+      ansible.builtin.set_fact:
+        telemt_version: "{{ telemt_release.json.tag_name }}"
+        telemt_asset_name: "telemt-{{ telemt_arch }}-linux-{{ telemt_libc }}.tar.gz"
+
+    - name: Вычисляем URL архива telemt
+      ansible.builtin.set_fact:
+        telemt_archive_url: >-
+          {{
+            (telemt_release.json.assets
+              | selectattr('name', 'equalto', telemt_asset_name)
+              | list | first).browser_download_url
+          }}
+
+    - name: Скачиваем архив telemt
+      ansible.builtin.get_url:
+        url: "{{ telemt_archive_url }}"
+        dest: "/tmp/telemt-{{ telemt_version }}.tar.gz"
+        mode: "0644"
+      register: telemt_dl
+
+    - name: Распаковываем telemt в /bin
+      ansible.builtin.unarchive:
+        src: "/tmp/telemt-{{ telemt_version }}.tar.gz"
+        dest: /bin
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0755"
+        extra_opts: ["--no-same-owner"]
+      notify: Restart telemt
+
+    - name: Рендерим конфиг telemt (с пользователями из текущего деплоя)
+      ansible.builtin.template:
+        src: eu_telemt.toml.j2
+        dest: /etc/telemt/telemt.toml
+        owner: telemt
+        group: telemt
+        mode: "0640"
+      notify: Restart telemt
+
+    - name: Рендерим systemd unit для telemt
+      ansible.builtin.template:
+        src: eu_telemt.service.j2
+        dest: /etc/systemd/system/telemt.service
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart telemt
+
+    - name: Включаем и стартуем telemt
+      ansible.builtin.systemd:
+        name: telemt
+        enabled: true
+        state: started
+        daemon_reload: true
