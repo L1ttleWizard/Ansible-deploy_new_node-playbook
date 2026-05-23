@@ -1,0 +1,11 @@
+services:
+  bridge-sender:
+    image: teddysun/xray:latest
+    container_name: bridge-sender
+    restart: always
+    ports:
+{% for host in groups['eu_nodes'] %}
+      - "127.0.0.1:{{ 4430 + loop.index }}:{{ 4430 + loop.index }}"
+{% endfor %}
+    volumes:
+      - ./config.json:/etc/xray/config.json:ro

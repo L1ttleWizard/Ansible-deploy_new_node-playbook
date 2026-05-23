@@ -1,0 +1,37 @@
+{
+  "log":{"loglevel":"info"},
+  "inbounds":[
+    {
+      "listen": "127.0.0.1",
+      "port": 55555,
+      "protocol": "vless",
+      "settings": {
+        "clients":[
+          {
+            "id": "{{ bridge_uuid }}",
+            "flow": "xtls-rprx-vision"
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "dest": "{{ bridge_sni }}:443",
+          "privateKey": "{{ bridge_private_key }}",
+          "serverNames":["{{ bridge_sni }}"],
+          "shortIds": [""]
+        }
+      }
+    }
+  ],
+  "outbounds":[
+    {
+      "protocol": "freedom",
+      "settings": {
+        "redirect": "{{ ansible_host }}:443"
+      }
+    }
+  ]
+}

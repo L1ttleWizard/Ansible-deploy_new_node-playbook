@@ -1,0 +1,194 @@
+---
+- name: Создаём директорию моста (чтобы stat не падал)
+  ansible.builtin.file:
+    path: /opt/bridge
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Проверяем, сгенерированы ли ключи Xray
+  ansible.builtin.stat:
+    path: /opt/bridge/keys.env
+  register: keys_file
+
+- name: Считываем ключи с сервера (если они уже есть)
+  ansible.builtin.slurp:
+    src: /opt/bridge/keys.env
+  register: keys_raw
+  when: keys_file.stat.exists
+
+- name: Сохраняем ключи как Facts (если они уже есть)
+  ansible.builtin.set_fact:
+    bridge_uuid: "{{ (keys_raw.content | b64decode | regex_search('UUID=(.*)', '\\1'))[0] }}"
+    bridge_private_key: "{{ (keys_raw.content | b64decode | regex_search('PRIV=(.*)', '\\1'))[0] }}"
+    bridge_public_key: "{{ (keys_raw.content | b64decode | regex_search('PUB=(.*)', '\\1'))[0] }}"
+  when: keys_file.stat.exists
+
+# Регистрация ноды и запуск Remnanode/Bridge только для Worker нод!
+- name: Настройка Worker-ноды
+  when: not (is_main | default(false) | bool)
+  block:
+    - name: Получаем список нод из Remnawave-панели
+      ansible.builtin.uri:
+        url: "https://{{ remnawave_domain }}/api/nodes/"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ remnawave_api_token }}"
+        return_content: true
+      register: nodes_list
+      delegate_to: localhost
+      become: false
+
+    - name: Проверяем, существует ли уже нода с таким IP
+      ansible.builtin.set_fact:
+        existing_node: "{{ nodes_list.json.response | selectattr('address', 'equalto', ansible_host) | list | first | default(none) }}"
+
+    - name: Создаём ноду через API (если её ещё нет)
+      ansible.builtin.uri:
+        url: "https://{{ remnawave_domain }}/api/nodes/"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ remnawave_api_token }}"
+        body_format: json
+        body:
+          name: "{{ inventory_hostname }}"
+          address: "{{ ansible_host }}"
+          port: "{{ node_port }}"
+          isTrafficTrackingActive: false
+          countryCode: "{{ country_code | default('EU') }}"
+          configProfile:
+            activeConfigProfileUuid: "{{ remnawave_profile_uuid }}"
+            activeInbounds: "{{ remnawave_inbounds }}"
+        status_code: 201
+        return_content: true
+      register: new_node_api
+      delegate_to: localhost
+      become: false
+      when: not existing_node
+
+    - name: Финализируем SECRET_KEY (для существующих нод)
+      ansible.builtin.set_fact:
+        final_node_secret: "{{ node_secret }}"
+      when: existing_node
+
+    - name: Финализируем SECRET_KEY (для новых нод)
+      ansible.builtin.set_fact:
+        final_node_secret: "{{ new_node_api.json.secretKey }}"
+      when: not existing_node
+
+    - name: Создаём директорию host_vars для новой ноды (если её не было)
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/host_vars/{{ inventory_hostname }}"
+        state: directory
+        mode: "0755"
+      delegate_to: localhost
+      become: false
+      when: not existing_node
+
+    - name: Сохраняем node_secret в host_vars (vars.yml)
+      ansible.builtin.copy:
+        content: |
+          ---
+          node_secret: "{{ '{{' }} vault_node_secret {{ '}}' }}"
+        dest: "{{ playbook_dir }}/host_vars/{{ inventory_hostname }}/vars.yml"
+        mode: "0644"
+      delegate_to: localhost
+      become: false
+      when: not existing_node
+
+    - name: Сохраняем node_secret в host_vars (vault.yml)
+      ansible.builtin.copy:
+        content: |
+          ---
+          vault_node_secret: "{{ final_node_secret }}"
+        dest: "{{ playbook_dir }}/host_vars/{{ inventory_hostname }}/vault.yml"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      when: not existing_node
+
+    - name: Шифруем vault.yml с помощью ansible-vault
+      ansible.builtin.command:
+        cmd: "ansible-vault encrypt {{ playbook_dir }}/host_vars/{{ inventory_hostname }}/vault.yml"
+      delegate_to: localhost
+      become: false
+      when: not existing_node
+      changed_when: true
+
+    - name: Создаём директорию для Remnanode
+      ansible.builtin.file:
+        path: /opt/remnanode
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Генерируем docker-compose для Remnanode
+      ansible.builtin.template:
+        src: eu_remnanode_docker-compose.yml.j2
+        dest: /opt/remnanode/docker-compose.yml
+        owner: root
+        group: root
+        mode: "0644"
+      register: remnanode_compose
+
+    - name: Запускаем Remnanode
+      community.docker.docker_compose_v2:
+        project_src: /opt/remnanode
+        state: present
+
+    # --- Auto-генерация UUID + ключей X25519 ---
+    - name: Авто-генерация UUID и ключей X25519 (если их не было)
+      ansible.builtin.shell: |
+        set -o pipefail
+        UUID=$(cat /proc/sys/kernel/random/uuid)
+        KEYS=$(docker run --rm teddysun/xray x25519)
+        PRIV=$(echo "$KEYS" | grep "Private key:" | awk '{print $3}')
+        PUB=$(echo "$KEYS"  | grep "Public key:"  | awk '{print $3}')
+        {
+          echo "UUID=$UUID"
+          echo "PRIV=$PRIV"
+          echo "PUB=$PUB"
+        } > /opt/bridge/keys.env
+      args:
+        executable: /bin/bash
+        creates: /opt/bridge/keys.env
+      when: not keys_file.stat.exists
+
+    - name: Считываем новые ключи
+      ansible.builtin.slurp:
+        src: /opt/bridge/keys.env
+      register: new_keys_raw
+      when: not keys_file.stat.exists
+
+    - name: Сохраняем новые ключи как Facts
+      ansible.builtin.set_fact:
+        bridge_uuid: "{{ (new_keys_raw.content | b64decode | regex_search('UUID=(.*)', '\\1'))[0] }}"
+        bridge_private_key: "{{ (new_keys_raw.content | b64decode | regex_search('PRIV=(.*)', '\\1'))[0] }}"
+        bridge_public_key: "{{ (new_keys_raw.content | b64decode | regex_search('PUB=(.*)', '\\1'))[0] }}"
+      when: not keys_file.stat.exists
+
+    # --- Bridge-receiver (Xray) ---
+    - name: Генерируем config.json для bridge-receiver
+      ansible.builtin.template:
+        src: eu_xray_config.json.j2
+        dest: /opt/bridge/config.json
+        owner: root
+        group: root
+        mode: "0644"
+      register: eu_bridge_conf
+
+    - name: Генерируем docker-compose.yml для bridge-receiver
+      ansible.builtin.template:
+        src: eu_docker-compose.yml.j2
+        dest: /opt/bridge/docker-compose.yml
+        owner: root
+        group: root
+        mode: "0644"
+      register: eu_bridge_compose
+
+    - name: Запускаем bridge-receiver
+      community.docker.docker_compose_v2:
+        project_src: /opt/bridge
+        state: present

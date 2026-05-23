@@ -1,0 +1,42 @@
+---
+- name: UFW (Debian/Ubuntu)
+  when: ansible_facts['os_family'] == "Debian"
+  block:
+    - name: Устанавливаем UFW
+      ansible.builtin.apt:
+        name: ufw
+        state: present
+    - name: Разрешаем SSH и HTTPS (порты 22, 443)
+      community.general.ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop: ["22", "443"]
+    - name: Включаем UFW
+      community.general.ufw:
+        state: enabled
+        policy: deny
+        direction: incoming
+
+- name: Firewalld (RedHat/AlmaLinux)
+  when: ansible_facts['os_family'] == "RedHat"
+  block:
+    - name: Устанавливаем firewalld
+      ansible.builtin.dnf:
+        name: firewalld
+        state: present
+    - name: Включаем firewalld
+      ansible.builtin.systemd:
+        name: firewalld
+        state: started
+        enabled: true
+    - name: Открываем 22/tcp, 443/tcp (через firewall-cmd)
+      ansible.builtin.command:
+        cmd: "firewall-cmd --permanent --add-port={{ item }}"
+      loop: ["22/tcp", "443/tcp"]
+      register: fwcmd_add
+      changed_when: "'success' in (fwcmd_add.stdout | default(''))"
+    - name: Применяем правила firewalld
+      ansible.builtin.command:
+        cmd: firewall-cmd --reload
+      changed_when: false

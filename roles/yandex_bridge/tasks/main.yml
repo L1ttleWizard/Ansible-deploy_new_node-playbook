@@ -1,0 +1,140 @@
+---
+- name: Создаём директорию для моста
+  ansible.builtin.file:
+    path: /opt/bridge
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Генерируем config.json для bridge-sender
+  ansible.builtin.template:
+    src: yandex_xray_config.json.j2
+    dest: /opt/bridge/config.json
+    owner: root
+    group: root
+    mode: "0644"
+  register: yandex_xray_config
+
+- name: Генерируем docker-compose.yml для bridge-sender
+  ansible.builtin.template:
+    src: yandex_docker-compose.yml.j2
+    dest: /opt/bridge/docker-compose.yml
+    owner: root
+    group: root
+    mode: "0644"
+  register: yandex_xray_compose
+
+# =========================================================================
+# ВНЕДРЕНИЕ В ИСХОДНИКИ HIDDIFY (.pj2)
+# =========================================================================
+- name: 1. Внедряем маршруты Matrix (HTTP)
+  ansible.builtin.blockinfile:
+    path: /opt/hiddify-manager/haproxy/fronts/in_httpmode.cfg.pj2
+    insertbefore: "default_backend nginx_dispatcher_http_h2"
+    marker: "  # {mark} ANSIBLE MANAGED BLOCK: MATRIX ROUTING"
+    block: |
+      http-request return status 200 content-type "application/json" string '{"m.homeserver":{"base_url":"https://www.zoomies-at-3am.cyou"}}' if { path /.well-known/matrix/client }
+      http-request return status 200 content-type "application/json" string '{"m.server":"www.zoomies-at-3am.cyou:443"}' if { path /.well-known/matrix/server }
+      acl is_matrix path_beg -i /_matrix /_synapse
+      use_backend tuwunel_backend if is_matrix
+  register: haproxy_mod_1
+
+- name: 2. Внедряем маршруты Matrix (QUIC)
+  ansible.builtin.blockinfile:
+    path: /opt/hiddify-manager/haproxy/fronts/in_httpmode_quic.cfg.pj2
+    insertbefore: "default_backend nginx_dispatcher_http_h2"
+    marker: "  # {mark} ANSIBLE MANAGED BLOCK: MATRIX ROUTING QUIC"
+    block: |
+      http-request return status 200 content-type "application/json" string '{"m.homeserver":{"base_url":"https://www.zoomies-at-3am.cyou"}}' if { path /.well-known/matrix/client }
+      http-request return status 200 content-type "application/json" string '{"m.server":"www.zoomies-at-3am.cyou:443"}' if { path /.well-known/matrix/server }
+      acl is_matrix_quic path_beg -i /_matrix /_synapse
+      use_backend tuwunel_backend if is_matrix_quic
+  register: haproxy_mod_2
+
+- name: 3. Внедряем маршруты Моста (SNI TCP)
+  ansible.builtin.blockinfile:
+    path: /opt/hiddify-manager/haproxy/fronts/sni_proxy.cfg.pj2
+    insertbefore: "default_backend to_https_in_ssl"
+    marker: "    # {mark} ANSIBLE MANAGED BLOCK: EU BRIDGE ROUTING"
+    block: |
+      {% for host in groups['eu_nodes'] %}
+        acl is_eu_bridge_{{ loop.index }} req.ssl_sni -i {{ hostvars[host]['bridge_sni'] }}
+        use_backend bk_eu_bridge_sender if is_eu_bridge_{{ loop.index }}
+      {% endfor %}
+      {% for sni in eu_client_snis | default(['ads.x5.ru', 'sberbank.ru', 'i.oneme.ru', 'yandex.ru', 'azure.microsoft.com']) %}
+        acl is_eu_bridge_client_{{ loop.index }} req.ssl_sni -i {{ sni }}
+        use_backend bk_eu_bridge_sender if is_eu_bridge_client_{{ loop.index }}
+      {% endfor %}
+  register: haproxy_mod_3
+
+- name: 4. Внедряем Бэкенды в общий список
+  ansible.builtin.blockinfile:
+    path: /opt/hiddify-manager/haproxy/backends/common.cfg.pj2
+    marker: "# {mark} ANSIBLE MANAGED BLOCK: MATRIX AND EU BRIDGE BACKENDS"
+    block: |
+      backend tuwunel_backend
+          mode http
+          http-request set-header Host %[req.hdr(Host)]
+          http-request set-header X-Forwarded-For %[src]
+          http-request set-header X-Forwarded-Proto https
+          server tuwunel_server 127.0.0.1:6167
+
+      backend bk_eu_bridge_sender
+          mode tcp
+          balance source
+          {% for host in groups['eu_nodes'] %}
+          server bridge_node_{{ loop.index }} 127.0.0.1:{{ 4430 + loop.index }} check
+          {% endfor %}
+  register: haproxy_mod_4
+
+- name: Запускаем bridge-sender на Яндексе
+  community.docker.docker_compose_v2:
+    project_src: /opt/bridge
+    state: present
+
+- name: Фиксим права HAProxy на чтение SSL-сертификатов Hiddify
+  ansible.builtin.file:
+    path: /opt/hiddify-manager/ssl
+    owner: root
+    group: haproxy
+    mode: "0750"
+    recurse: true
+  failed_when: false
+
+# Отключаем DPI-палевные протоколы (mieru, hysteria2, tuic, naive,
+# shadowtls). Они рендерятся в singbox-конфиги по флагам в
+# bool_config таблице hiddifypanel; trafficка по их публичным портам
+# (mieru tcp 25733-25736 / udp 27693-27696, hysteria2 udp 11196/11199
+# и т.д.) — характерные DPI-сигнатуры. На прод-узле остаются только
+# 443 (haproxy) + 22 (ssh) + 80 (haproxy redirect).
+- name: Отключаем DPI-палевные протоколы в hiddify-panel (Yandex)
+  ansible.builtin.shell: |
+    set -o pipefail
+    mysql -u root hiddifypanel <<'SQL'
+    UPDATE bool_config SET value=0
+      WHERE `key` IN (
+        'mieru_enable',
+        'hysteria_enable',
+        'hysteria_obfs_enable',
+        'tuic_enable',
+        'naive_enable',
+        'shadowtls_enable'
+      );
+    SQL
+  args:
+    executable: /bin/bash
+  register: dpi_disable
+  changed_when: true
+
+- name: Применяем конфиг Hiddify
+  ansible.builtin.shell: |
+    set -o pipefail
+    echo "" | bash /opt/hiddify-manager/apply_configs.sh
+  args:
+    executable: /bin/bash
+  when: >-
+    haproxy_mod_1.changed or haproxy_mod_2.changed
+    or haproxy_mod_3.changed or haproxy_mod_4.changed
+    or dpi_disable.changed
+  changed_when: true

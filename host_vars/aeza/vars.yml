@@ -1,0 +1,2 @@
+---
+node_secret: "{{ vault_node_secret }}"

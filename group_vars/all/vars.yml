@@ -1,8 +1,5 @@
 ---
 remnawave_domain: "nekodera.kawaiinekos.cfd"
-remnawave_api_token: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1dWlkIjoiMjBkOGY1MjQtNTU3NS00M2I1LWFkMzgtNWRjNDIwNmI3OWM5IiwidXNlcm5hbWUiOm51bGwsInJvbGUiOiJBUEkiLCJpYXQiOjE3NzA5Mjk1MzUsImV4cCI6MTA0MTA4NDMxMzV9.DrZ0c7jsqyiN5zenv3HXrVhPSQtNn20Yb6BdVlw_b7k"
-
-# Твои данные из payload
 remnawave_profile_uuid: "7b819d85-3004-480f-99a7-43337e47cbba"
 remnawave_inbounds:
   - "d5ee5800-8a71-4f1c-b0b0-a489621c785e"
@@ -10,3 +7,5 @@ remnawave_inbounds:
   - "d0a5a963-2bc0-4fff-bf37-56b5e9e40df6"
   - "8b3370a9-c28f-4535-8731-0fbf211cfb2c"
 
+remnawave_api_token: "{{ vault_remnawave_api_token }}"
+telemt_users: "{{ vault_telemt_users }}"

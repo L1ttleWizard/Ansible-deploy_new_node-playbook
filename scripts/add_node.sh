@@ -118,6 +118,12 @@ if [[ ! -f "$PLAYBOOK" ]]; then
     echo "[add_node] deploy.yml не найден: $PLAYBOOK" >&2
     exit 1
 fi
+if [[ ! -f "$REPO_DIR/.vault-pass" ]]; then
+    echo "[add_node] Ошибка: файл пароля vault (.vault-pass) не найден в $REPO_DIR" >&2
+    echo "[add_node] Пожалуйста, создайте этот файл с паролем от Ansible Vault." >&2
+    exit 1
+fi
+
 
 echo "[add_node] === Параметры ==="
 echo "[add_node] name=$NAME address=$ADDRESS ssh_port=$SSH_PORT"
